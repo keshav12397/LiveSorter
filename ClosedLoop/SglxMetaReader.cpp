@@ -61,6 +61,38 @@ std::vector<int> parseChanSubset( const std::string &spec )
 }
 
 
+std::vector<int> loadChanMapJson( const std::string &path )
+{
+    std::ifstream fh( path.c_str() );
+    if( !fh.is_open() )
+        throw std::runtime_error( "loadChanMapJson: could not open '" + path + "'" );
+
+    std::stringstream buf;
+    buf << fh.rdbuf();
+    std::string content = buf.str();
+
+    size_t key = content.find( "\"chanMap\"" );
+    if( key == std::string::npos )
+        throw std::runtime_error( "loadChanMapJson: no 'chanMap' field in '" + path + "'" );
+
+    size_t open = content.find( '[', key );
+    size_t close = content.find( ']', open );
+    if( open == std::string::npos || close == std::string::npos )
+        throw std::runtime_error( "loadChanMapJson: malformed 'chanMap' array in '" + path + "'" );
+
+    std::string arr = content.substr( open + 1, close - open - 1 );
+    std::vector<int> out;
+    std::stringstream ss( arr );
+    std::string tok;
+    while( std::getline( ss, tok, ',' ) ) {
+        if( !tok.empty() )
+            out.push_back( std::atoi( tok.c_str() ) );
+    }
+
+    return out;
+}
+
+
 SglxMeta SglxMeta::load( const std::string &metaPath )
 {
     std::map<std::string, std::string> meta = parseMetaFile( metaPath );

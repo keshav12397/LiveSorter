@@ -10,6 +10,15 @@ filterDir=D:/test_newsorter/filters_out
 targetId=74
 templateLength=61
 
+# --- Preprocessing (MUST match how the filter was trained -- see README) ---
+# Same channel-map JSON passed to generate_filter.py's --channel-map-json.
+# CAR is computed across this FULL group, not just the filter's 5 channels
+# -- doing otherwise leaves shared noise unrejected and was found live to
+# cause a massive false-positive blowup. Leave blank to disable CAR.
+carChannelMapJson=D:/test_newsorter/rawData/shank1only.json
+applyHighpass=true
+highpassCutoffHz=300
+
 # --- Calibration (Phase A) ----------------------------------------------
 # trainingBinPath MUST be the exact file Kilosort was run on -- see README.
 skipCalibration=false

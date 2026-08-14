@@ -57,7 +57,7 @@ import re
 import sys
 
 import numpy as np
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, filtfilt, lfilter
 from scipy.linalg import toeplitz
 
 
@@ -173,6 +173,42 @@ def highpass(data, fc, fs, order=2):
     """Zero-phase high-pass, matching butter(2, ...)+filtfilt in MATLAB."""
     b, a = butter(order, 2 * fc / fs, btype="high")
     return filtfilt(b, a, data, axis=0)
+
+
+def highpass_causal_biquad(data, fc, fs):
+    """Causal high-pass, coefficient-for-coefficient identical to
+    ClosedLoop/ButterworthHighpass.h (RBJ Audio-EQ-Cookbook 2nd-order
+    Butterworth biquad, Q=1/sqrt(2)).
+
+    Use this (via --causal-highpass) instead of `highpass()`'s zero-phase
+    filtfilt when the filter/threshold will be deployed against the C++
+    live pipeline, which can only filter causally. `filtfilt` and this
+    causal biquad have the same magnitude response shape but different
+    phase -- calibrating against filtfilt-preprocessed data while running
+    causal-biquad-preprocessed data live silently degrades the matched
+    filter's correlation with real spike waveforms (found the hard way:
+    C++ live recall capped around 45-63% vs. this function's ~97% when the
+    mismatch was still present). Training the filter on the exact same
+    causal filter closes that gap by construction, instead of trying to
+    make the live filter impossibly match filtfilt's zero-phase response.
+    """
+    Q = 1.0 / np.sqrt(2.0)
+    w0 = 2.0 * np.pi * fc / fs
+    cosw0 = np.cos(w0)
+    sinw0 = np.sin(w0)
+    alpha = sinw0 / (2.0 * Q)
+    a0 = 1.0 + alpha
+    b0 = ((1.0 + cosw0) / 2.0) / a0
+    b1 = (-(1.0 + cosw0)) / a0
+    b2 = ((1.0 + cosw0) / 2.0) / a0
+    a1 = (-2.0 * cosw0) / a0
+    a2 = (1.0 - alpha) / a0
+    b = np.array([b0, b1, b2])
+    a = np.array([1.0, a1, a2])
+    # lfilter (not filtfilt) -- causal, zero initial state, exactly matching
+    # ButterworthHighpass::processSample's per-sample recursion starting
+    # from x1_=x2_=y1_=y2_=0.
+    return lfilter(b, a, data, axis=0)
 
 
 # --------------------------------------------------------------------- #
@@ -444,6 +480,13 @@ def main():
                      help="Apply high-pass filter before everything else")
     ap.add_argument("--no-filter", dest="filter", action="store_false")
     ap.add_argument("--fc", type=float, default=300.0, help="High-pass cutoff (Hz)")
+    ap.add_argument("--causal-highpass", action="store_true",
+                     help="Use the causal RBJ biquad (matching "
+                          "ClosedLoop/ButterworthHighpass.h exactly) instead "
+                          "of zero-phase filtfilt. Use this when the filter "
+                          "will be deployed against the C++ live pipeline, "
+                          "which can only filter causally -- see "
+                          "highpass_causal_biquad()'s docstring.")
     ap.add_argument("--ridge", type=float, default=1e-3,
                      help="Regularization strength for the R inverse")
     ap.add_argument("--threshold-k", type=float, default=5.0,
@@ -511,7 +554,11 @@ def main():
           f"({data.nbytes / 1e9:.1f} GB)")
 
     if args.filter:
-        data = highpass(data, args.fc, fs)
+        if args.causal_highpass:
+            print("Using causal RBJ biquad highpass (matches C++ live pipeline exactly)")
+            data = highpass_causal_biquad(data, args.fc, fs)
+        else:
+            data = highpass(data, args.fc, fs)
     if args.car:
         data = common_average_reference(data)
 

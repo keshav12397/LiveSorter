@@ -28,8 +28,10 @@ runs it against a live SpikeGLX session.
 2. **Live** (`ImecFetchThread`, `NiFetchThread`, `DecisionThread`): three
    threads, each with its own SpikeGLX connection handle (never share a
    handle across threads -- see "Concurrency rules" below):
-   - `ImecFetchThread` continuously fetches the target's filter channels +
-     the IMEC SY (sync) channel in `fetchChunkMs` chunks, runs the shared
+   - `ImecFetchThread` continuously fetches the **full CAR channel group**
+     (see "Preprocessing must match training" below) + the IMEC SY (sync)
+     channel in `fetchChunkMs` chunks, runs highpass+CAR across that full
+     group, subsets down to the filter's own channels, runs the shared
      `ConvolutionEngine`, and reports spikes (as "seconds since the SY
      channel's most recent sync-pulse edge") to `DecisionThread` and to
      `spikeTimesPath`.
@@ -40,6 +42,35 @@ runs it against a live SpikeGLX session.
    - `DecisionThread` owns a third, dedicated handle purely for issuing
      `sglx_ni_DO_set` calls, counts recent spikes in the configured window
      after each syllable event, and raises/lowers the digital line.
+
+## Preprocessing must match training (CAR channel group especially)
+
+Both `Calibration` and `ImecFetchThread` run the filter's input through
+`Preprocessor` (high-pass, then common-average-reference, same order as
+`FilterGen/generate_filter.py`) before convolving. **CAR must be computed
+across the same full channel group the filter was trained with** (e.g. all
+96 shank channels via `carChannelMapJson`, matching generate_filter.py's
+`--channel-map-json`) -- **not** just the filter's own 5 channels. Computing
+CAR over too few channels doesn't reject the shared noise the filter's
+statistics (channel selection, LCMV weights, threshold) were calibrated
+against.
+
+This was found the expensive way: an earlier version fetched only the
+filter's 5 channels live, applied no CAR/highpass at all, and produced over
+a million spurious "detections" in about a minute of live data (the
+detector was saturating at the minimum re-trigger separation, not finding
+real sparse spikes). Both `Calibration` and `ImecFetchThread` now fetch/read
+the full CAR group and only subset down to the filter's channels *after*
+preprocessing -- see either file's channel-index bookkeeping
+(`filterIndexWithinCarGroup`) for exactly how.
+
+The high-pass filter itself is a necessary approximation: `generate_filter.py`
+uses `scipy.signal.filtfilt` (zero-phase, needs samples from both before
+*and* after each point -- impossible live), so `ButterworthHighpass` uses a
+standard causal biquad (same cutoff/order, RBJ Audio-EQ-Cookbook formula)
+instead. Same frequency response shape, different phase -- acceptable for
+matching the *scale* of noise the filter was calibrated against, not meant
+to be sample-for-sample identical to Python's offline result.
 
 ## Cross-stream time alignment
 

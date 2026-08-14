@@ -28,4 +28,16 @@ std::vector<int> parseChanSubset( const std::string &spec );
 // need a field this struct doesn't surface.
 std::map<std::string, std::string> parseMetaFile( const std::string &metaPath );
 
+// Minimal loader for a Kilosort-style probe/channel-map JSON's "chanMap"
+// field (e.g. FilterGen's shank1only.json) -- deliberately NOT a general
+// JSON parser, just enough to pull out one integer array, matching
+// FilterGen/generate_filter.py's load_channel_map_json(). This is the CAR
+// channel group: per the README/this project's own live testing, CAR must
+// be computed across the SAME full channel group used when the filter was
+// trained (all 96 shank channels here), not just the filter's own 5
+// channels -- computing CAR over too few channels doesn't reject the
+// shared noise the filter's statistics were calibrated against, and
+// caused a real, large false-positive blowup found via live testing.
+std::vector<int> loadChanMapJson( const std::string &path );
+
 #endif // CLOSEDLOOP_SGLXMETAREADER_H

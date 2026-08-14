@@ -65,7 +65,7 @@ void ConvolutionEngine::reset()
 
 
 std::vector<PeakEvent> ConvolutionEngine::processChunk(
-    const short *data, size_t nSamples, long long streamSampleOffset )
+    const double *data, size_t nSamples, long long streamSampleOffset )
 {
     std::vector<PeakEvent> peaks;
     if( nSamples == 0 )
@@ -77,8 +77,8 @@ std::vector<PeakEvent> ConvolutionEngine::processChunk(
     const size_t total   = histLen + nSamples;
 
     // combined = [history_ (histLen samples)] + [new chunk (nSamples samples)],
-    // time-major/channel-minor, same layout as the raw fetch/bin data.
-    std::vector<short> combined( total * nCh );
+    // time-major/channel-minor, same layout as the preprocessed data.
+    std::vector<double> combined( total * nCh );
     if( histLen > 0 )
         std::copy( history_.begin(), history_.begin() + histLen * nCh, combined.begin() );
     std::copy( data, data + nSamples * nCh, combined.begin() + histLen * nCh );
@@ -104,11 +104,11 @@ std::vector<PeakEvent> ConvolutionEngine::processChunk(
 
             for( size_t k = 0; k < L; ++k ) {
 
-                const short  *samplePtr = &combined[(windowStart + k) * nCh];
+                const double *samplePtr = &combined[(windowStart + k) * nCh];
                 const double *tapPtr    = &taps_[k * nCh];
 
                 for( size_t ch = 0; ch < nCh; ++ch )
-                    sum += static_cast<double>( samplePtr[ch] ) * tapPtr[ch];
+                    sum += samplePtr[ch] * tapPtr[ch];
             }
 
             Dvals[idx] = sum;

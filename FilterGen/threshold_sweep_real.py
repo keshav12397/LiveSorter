@@ -54,7 +54,11 @@ def load_and_prepare(args, rng):
     print(f"Loaded ({data.nbytes / 1e9:.1f} GB)")
 
     if args.filter:
-        data = gf.highpass(data, args.fc, fs)
+        if args.causal_highpass:
+            print("Using causal RBJ biquad highpass (matches C++ live pipeline exactly)")
+            data = gf.highpass_causal_biquad(data, args.fc, fs)
+        else:
+            data = gf.highpass(data, args.fc, fs)
     if args.car:
         data = gf.common_average_reference(data)
 
@@ -176,6 +180,11 @@ def main():
     ap.add_argument("--car", action="store_true", default=True)
     ap.add_argument("--no-car", dest="car", action="store_false")
     ap.add_argument("--fc", type=float, default=300.0)
+    ap.add_argument("--causal-highpass", action="store_true",
+                     help="Use the causal RBJ biquad (matches "
+                          "ClosedLoop/ButterworthHighpass.h exactly) instead "
+                          "of zero-phase filtfilt -- use this to validate a "
+                          "filter/threshold intended for the C++ live pipeline.")
     ap.add_argument("--n-thresholds", type=int, default=60)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--seed", type=int, default=0)

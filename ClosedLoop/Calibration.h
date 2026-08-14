@@ -31,10 +31,19 @@ public:
     // filterBank supplies the channels + filter taps to convolve with;
     // its own `threshold` field is ignored (that's exactly what this
     // computes). criterion is "best_f1" or "best_recall_under_fp_rate".
+    //
+    // carChannelMapJsonPath: the SAME channel-map JSON (e.g. shank1only.json)
+    // passed to FilterGen/generate_filter.py's --channel-map-json when this
+    // filter was trained -- CAR must be computed across this full channel
+    // group, not just filterBank's 5 channels (see Preprocessor.h). Pass ""
+    // to disable CAR entirely (matching --no-car).
     static Result run( const std::string &trainingBinPath,
                         const std::string &trainingKsDir,
                         int targetId,
                         const FilterBank &filterBank,
+                        const std::string &carChannelMapJsonPath,
+                        bool applyHighpass,
+                        double highpassCutoffHz,
                         int fetchChunkMs,
                         const std::string &criterion,
                         double maxFalsePositiveRateHz,

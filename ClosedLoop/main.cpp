@@ -43,6 +43,13 @@ BOOL WINAPI consoleCtrlHandler( DWORD ctrlType )
 
 int main( int argc, char **argv )
 {
+    // std::cout is fully buffered (not line-buffered) when redirected to a
+    // file/pipe rather than a live console -- without this, status output
+    // (calibration results, connection status, etc.) can sit invisible in
+    // the buffer for a long time even while the app is actively running
+    // and fetching. unitbuf flushes after every insertion.
+    std::cout << std::unitbuf;
+
     if( argc < 2 ) {
         std::cerr << "Usage: " << argv[0] << " <config.txt>\n";
         return 1;
@@ -54,6 +61,13 @@ int main( int argc, char **argv )
         std::string filterDir      = cfg.requireString( "filterDir" );
         int         targetId       = cfg.requireInt( "targetId" );
         int         templateLength = cfg.getInt( "templateLength", 61 );
+
+        // CAR must be computed across the SAME channel group the filter was
+        // trained with (see README.md / Preprocessor.h) -- pass the same
+        // channel-map JSON given to FilterGen's --channel-map-json.
+        std::string carChannelMapJson = cfg.getString( "carChannelMapJson", "" );
+        bool        applyHighpass     = cfg.getBool( "applyHighpass", true );
+        double      highpassCutoffHz  = cfg.getDouble( "highpassCutoffHz", 300.0 );
 
         FilterBank filterBank = FilterBank::load( filterDir, targetId, templateLength );
         std::cout << "Loaded filter for target " << targetId << ": "
@@ -70,6 +84,9 @@ int main( int argc, char **argv )
                 cfg.requireString( "trainingKsDir" ),
                 targetId,
                 filterBank,
+                carChannelMapJson,
+                applyHighpass,
+                highpassCutoffHz,
                 cfg.getInt( "fetchChunkMs", 5 ),
                 cfg.getString( "calibrationCriterion", "best_f1" ),
                 cfg.getDouble( "maxFalsePositiveRateHz", 1.0 ),
@@ -115,6 +132,7 @@ int main( int argc, char **argv )
 
         ImecFetchThread imecThread(
             hIM, filterBank,
+            carChannelMapJson, applyHighpass, highpassCutoffHz,
             cfg.getInt( "imecSyncBit", 6 ),
             cfg.getInt( "fetchChunkMs", 5 ),
             spikeQueue,

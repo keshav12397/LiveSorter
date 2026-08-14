@@ -12,6 +12,7 @@
 #include "SglxMetaReader.h"
 #include "ConvolutionEngine.h"
 #include "NpyReader.h"
+#include "Preprocessor.h"
 
 
 namespace {
@@ -54,6 +55,9 @@ Calibration::Result Calibration::run(
     const std::string &trainingKsDir,
     int targetId,
     const FilterBank &filterBank,
+    const std::string &carChannelMapJsonPath,
+    bool applyHighpass,
+    double highpassCutoffHz,
     int fetchChunkMs,
     const std::string &criterion,
     double maxFalsePositiveRateHz,
@@ -67,14 +71,37 @@ Calibration::Result Calibration::run(
     for( size_t i = 0; i < meta.savedChannelIds.size(); ++i )
         channelPosition[meta.savedChannelIds[i]] = static_cast<int>( i );
 
-    std::vector<int> filterColumns( filterBank.channels.size() );
-    for( size_t i = 0; i < filterBank.channels.size(); ++i ) {
-        std::map<int, int>::const_iterator it = channelPosition.find( filterBank.channels[i] );
+    // CAR channel group: the full shank (or whatever group was used to
+    // train this filter), NOT just filterBank's 5 channels -- see
+    // Preprocessor.h for why that distinction matters. Falls back to just
+    // the filter's own channels if no map is given (CAR effectively
+    // disabled/degenerate in that case).
+    bool applyCar = !carChannelMapJsonPath.empty();
+    std::vector<int> carChannelIds = applyCar
+        ? loadChanMapJson( carChannelMapJsonPath )
+        : filterBank.channels;
+
+    std::vector<int> carColumns( carChannelIds.size() ); // position within each raw row
+    for( size_t i = 0; i < carChannelIds.size(); ++i ) {
+        std::map<int, int>::const_iterator it = channelPosition.find( carChannelIds[i] );
         if( it == channelPosition.end() ) {
-            throw std::runtime_error( "Calibration: filter channel " +
-                std::to_string( filterBank.channels[i] ) + " not found in training .meta's snsSaveChanSubset" );
+            throw std::runtime_error( "Calibration: CAR channel " +
+                std::to_string( carChannelIds[i] ) + " not found in training .meta's snsSaveChanSubset" );
         }
-        filterColumns[i] = it->second;
+        carColumns[i] = it->second;
+    }
+
+    // Where each of the filter's channels lands within the CAR group's
+    // compact buffer, so we can extract them *after* CAR is applied.
+    std::vector<int> filterIndexWithinCarGroup( filterBank.channels.size() );
+    for( size_t j = 0; j < filterBank.channels.size(); ++j ) {
+        std::vector<int>::const_iterator it =
+            std::find( carChannelIds.begin(), carChannelIds.end(), filterBank.channels[j] );
+        if( it == carChannelIds.end() ) {
+            throw std::runtime_error( "Calibration: filter channel " +
+                std::to_string( filterBank.channels[j] ) + " is not part of the CAR channel group" );
+        }
+        filterIndexWithinCarGroup[j] = static_cast<int>( it - carChannelIds.begin() );
     }
 
     // ---- Load ground truth ------------------------------------------------
@@ -99,14 +126,17 @@ Calibration::Result Calibration::run(
     if( !fh.is_open() )
         throw std::runtime_error( "Calibration: could not open '" + trainingBinPath + "'" );
 
-    const int nCh = filterBank.nChannels();
+    const int nCh    = filterBank.nChannels();
+    const int nCarCh = static_cast<int>( carChannelIds.size() );
     const long long chunkSamples = static_cast<long long>(
         fetchChunkMs / 1000.0 * meta.sampleRateHz + 0.5 );
 
     ConvolutionEngine engine( filterBank.templateLength, nCh, filterBank.taps );
+    Preprocessor preprocessor( nCarCh, highpassCutoffHz, meta.sampleRateHz, applyHighpass, applyCar );
 
     std::vector<short> rawChunk( static_cast<size_t>( chunkSamples ) * meta.nSavedChans );
-    std::vector<short> compactChunk( static_cast<size_t>( chunkSamples ) * nCh );
+    std::vector<short> carChunk( static_cast<size_t>( chunkSamples ) * nCarCh );
+    std::vector<double> compactChunk( static_cast<size_t>( chunkSamples ) * nCh );
 
     std::vector<PeakEvent> allPeaks;
     long long streamSampleOffset = 0;
@@ -121,11 +151,25 @@ Calibration::Result Calibration::run(
         if( gotSamples <= 0 )
             break;
 
+        // Extract the full CAR group first...
         for( long long s = 0; s < gotSamples; ++s ) {
             const short *srcRow = &rawChunk[static_cast<size_t>( s ) * meta.nSavedChans];
-            short       *dstRow = &compactChunk[static_cast<size_t>( s ) * nCh];
+            short       *dstRow = &carChunk[static_cast<size_t>( s ) * nCarCh];
+            for( int c = 0; c < nCarCh; ++c )
+                dstRow[c] = srcRow[carColumns[c]];
+        }
+
+        // ...run highpass+CAR across that FULL group...
+        std::vector<double> preprocessed =
+            preprocessor.processChunk( &carChunk[0], static_cast<size_t>( gotSamples ) );
+
+        // ...and only THEN subset down to the filter's own channels.
+        compactChunk.resize( static_cast<size_t>( gotSamples ) * nCh );
+        for( long long s = 0; s < gotSamples; ++s ) {
+            const double *srcRow = &preprocessed[static_cast<size_t>( s ) * nCarCh];
+            double       *dstRow = &compactChunk[static_cast<size_t>( s ) * nCh];
             for( int c = 0; c < nCh; ++c )
-                dstRow[c] = srcRow[filterColumns[c]];
+                dstRow[c] = srcRow[filterIndexWithinCarGroup[c]];
         }
 
         std::vector<PeakEvent> peaks = engine.processChunk(

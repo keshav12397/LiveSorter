@@ -54,11 +54,11 @@ public:
     // testing).
     void reset();
 
-    // data: nSamples * nChannels int16 values, time-major/channel-minor
-    // (data[t*nChannels+ch]) -- the same layout SpikeGLX's fetch API and
-    // .bin files use. streamSampleOffset = absolute sample index of the
-    // stream that data[0] corresponds to.
-    std::vector<PeakEvent> processChunk( const short *data, size_t nSamples,
+    // data: nSamples * nChannels PREPROCESSED (highpass+CAR'd, see
+    // Preprocessor) double values, time-major/channel-minor
+    // (data[t*nChannels+ch]). streamSampleOffset = absolute sample index of
+    // the stream that data[0] corresponds to.
+    std::vector<PeakEvent> processChunk( const double *data, size_t nSamples,
                                           long long streamSampleOffset );
 
 private:
@@ -71,7 +71,7 @@ private:
 
     // History retains leftMargin_ + rightMargin_ samples (== templateLength_-1)
     // so a fresh chunk can immediately compute D for indices near its start.
-    std::vector<short>  history_;
+    std::vector<double> history_;
     size_t              historyCount_;
 
     long long           lastDecidedAbsIndex_;   // last sample index already accept/reject-decided

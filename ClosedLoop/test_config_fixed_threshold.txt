@@ -1,5 +1,6 @@
-# Test config for calibration cross-check against the real dataset used
-# throughout this session's Python work (FilterGen/).
+# Diagnostic: skip calibration, use the Python-validated threshold (0.706)
+# directly against live data, to isolate whether the remaining gap is in
+# calibration's preprocessing (CAR/highpass) vs. the core convolution math.
 sglxHost=localhost
 sglxPort=4142
 filterDir=D:/test_newsorter/filters_out
@@ -8,12 +9,7 @@ templateLength=61
 carChannelMapJson=D:/test_newsorter/rawData/shank1only.json
 applyHighpass=true
 highpassCutoffHz=300
-skipCalibration=false
-trainingBinPath=D:/test_newsorter/rawData/Lav69_d1.0_g0_tcat.imec0.ap.bin
-trainingKsDir=D:/test_newsorter/ks_out
-calibrationLogPath=D:/test_newsorter/filters_out/cpp_calibration_log_74.csv
-calibrationCriterion=best_f1
-maxFalsePositiveRateHz=1.0
+skipCalibration=true
 fetchChunkMs=5
 niSyncBit=0
 niSyllableLines=5,6,7
