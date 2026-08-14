@@ -2,6 +2,7 @@
 #define CLOSEDLOOP_CONVOLUTIONENGINE_H
 
 #include <vector>
+#include <deque>
 #include <cstdint>
 
 // One detected local maximum of the matched-filter output.
@@ -74,8 +75,15 @@ private:
     std::vector<double> history_;
     size_t              historyCount_;
 
+    // Trailing buffer of already-computed D (matched-filter output) values,
+    // used for proper windowed non-max suppression -- see the derivation
+    // comment in ConvolutionEngine.cpp. dBuffer_[i] is the D value at
+    // absolute sample index (dBufferStartAbsIndex_ + i); only meaningful
+    // while dBuffer_ is non-empty.
+    std::deque<double> dBuffer_;
+    long long          dBufferStartAbsIndex_;
+
     long long           lastDecidedAbsIndex_;   // last sample index already accept/reject-decided
-    long long           lastAcceptedPeakIndex_;  // last sample index accepted as a peak
 };
 
 #endif // CLOSEDLOOP_CONVOLUTIONENGINE_H

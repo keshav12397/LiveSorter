@@ -26,12 +26,25 @@
 // shift wrong, and silently cratered Calibration's recall/precision against
 // ground truth. Matching Python's formula exactly removes the whole class of
 // bug: PeakEvent::sampleIndex is directly comparable to spike_times.npy with
-// no correction, at the cost of a small fixed reporting delay (rightMargin
-// samples -- ~1ms at 30kHz for a 61-tap filter -- since a detection at n
-// can't be finalized until n+rightMargin has arrived in a later chunk).
-// That delay is absorbed by the existing history/overlap buffering below;
-// it's functionally identical to fetching overlapping windows from the
-// server, just reusing already-fetched samples locally instead.
+// no correction, at the cost of a small fixed reporting delay -- see below.
+//
+// Peak decisions use proper windowed non-max suppression (accept n only if
+// D[n] is the tallest value in [n-minSep, n+minSep]), matching
+// scipy.signal.find_peaks(distance=minSep)'s behavior -- NOT a greedy
+// "far enough from the last *accepted* peak" rule. The greedy version let a
+// small spurious side-lobe a few samples before a real spike's true, taller
+// peak claim the exclusion zone first and silently discard the real
+// detection; recall capped around 50% even at the loosest possible
+// threshold before this fix, which is only explainable by genuine spikes
+// never reaching the candidate list, not a scoring problem.
+//
+// Deciding n this way needs D-values up to n+minSep, and D[n+minSep] itself
+// needs rightMargin raw samples past that -- so the total reporting delay is
+// (rightMargin + minSep) samples, held in dBuffer_/history_ respectively
+// (functionally identical to fetching overlapping windows from the server,
+// just reusing already-fetched samples locally instead). At 30kHz with a
+// 61-tap filter and the default minSep=templateLength/2, that's ~60 samples
+// (~2ms) -- trivial against a 10ms budget.
 // -------------------------------------------------------------------------
 
 
@@ -55,12 +68,13 @@ void ConvolutionEngine::reset()
 {
     history_.clear();
     historyCount_ = 0;
-    // Sentinels far enough negative that the very first real peak is
-    // always eligible (no prior "last accepted"/"last decided" to collide
-    // with), while staying safely away from LLONG_MIN so `absIndex -
-    // lastAcceptedPeakIndex_` can't overflow.
-    lastDecidedAbsIndex_    = LLONG_MIN / 2;
-    lastAcceptedPeakIndex_  = LLONG_MIN / 2;
+    dBuffer_.clear();
+    dBufferStartAbsIndex_ = 0;
+    // Sentinel far enough negative that the very first real peak is always
+    // eligible (no prior "last decided" index to collide with), while
+    // staying safely away from LLONG_MIN so `n - lastDecidedAbsIndex_`-style
+    // arithmetic can't overflow.
+    lastDecidedAbsIndex_ = LLONG_MIN / 2;
 }
 
 
@@ -114,30 +128,79 @@ std::vector<PeakEvent> ConvolutionEngine::processChunk(
             Dvals[idx] = sum;
         }
 
-        // Local maxima with minimum separation. Only interior points of
-        // Dvals can be verified as local maxima (need both neighbors); the
-        // very last point is deliberately left un-decided -- it will be
-        // re-examined next call once its true right-neighbor sample is
-        // available, via lastDecidedAbsIndex_.
-        for( size_t idx = 1; idx + 1 < nD; ++idx ) {
+        // Append newly computed D-values into the persistent score buffer,
+        // skipping indices already appended by a previous call -- this
+        // chunk's recomputation range overlaps the previous chunk's tail
+        // (same raw history, so identical D values) because of leftMargin_/
+        // rightMargin_ overlap-save.
+        for( size_t idx = 0; idx < nD; ++idx ) {
 
             const long long absIndex = firstCombinedAbsIndex + static_cast<long long>( firstValid + idx );
 
-            if( absIndex <= lastDecidedAbsIndex_ )
-                continue; // already decided in a previous call
+            if( dBuffer_.empty() ) {
+                dBufferStartAbsIndex_ = absIndex;
+                dBuffer_.push_back( Dvals[idx] );
+            }
+            else if( absIndex > dBufferStartAbsIndex_ + static_cast<long long>( dBuffer_.size() ) - 1 ) {
+                dBuffer_.push_back( Dvals[idx] );
+            }
+            // else: absIndex already covered by a previous call -- skip.
+        }
+    }
 
-            if( Dvals[idx] > Dvals[idx - 1] && Dvals[idx] > Dvals[idx + 1] ) {
+    // Decide every buffered index n whose full [n-minSep, n+minSep] window
+    // of D-values is now available (i.e. enough *future* score values have
+    // arrived), accepting n only if it's the tallest value in that window --
+    // true non-max suppression, matching scipy.signal.find_peaks(distance=..).
+    //
+    // An earlier version accepted the first strict local maximum (immediate
+    // neighbors only) that was simply >= minSeparationSamples_ samples past
+    // the *last accepted* peak. That greedy left-to-right rule lets a small
+    // spurious side-lobe a few samples *before* a real spike's true (taller)
+    // peak claim the exclusion zone first, silently discarding the real
+    // detection. It was found via calibration recall capping around 50% even
+    // at the loosest possible threshold (accepting virtually every candidate
+    // score) -- only explainable by genuine spikes never reaching the
+    // candidate list at all, not by a scoring/thresholding problem.
+    if( !dBuffer_.empty() ) {
 
-                if( absIndex - lastAcceptedPeakIndex_ >= minSeparationSamples_ ) {
-                    PeakEvent pe;
-                    pe.sampleIndex = absIndex; // already Kilosort-convention-aligned, no shift needed
-                    pe.score       = Dvals[idx];
-                    peaks.push_back( pe );
-                    lastAcceptedPeakIndex_ = absIndex;
-                }
+        const long long newestBuffered =
+            dBufferStartAbsIndex_ + static_cast<long long>( dBuffer_.size() ) - 1;
+
+        long long n = lastDecidedAbsIndex_ + 1;
+        if( n < dBufferStartAbsIndex_ )
+            n = dBufferStartAbsIndex_;
+
+        for( ; n + minSeparationSamples_ <= newestBuffered; ++n ) {
+
+            const long long winLo = std::max( dBufferStartAbsIndex_, n - minSeparationSamples_ );
+            const long long winHi = n + minSeparationSamples_; // <= newestBuffered by loop condition
+            const double    dn    = dBuffer_[static_cast<size_t>( n - dBufferStartAbsIndex_ )];
+
+            bool isPeak = true;
+            for( long long m = winLo; m <= winHi && isPeak; ++m ) {
+                if( m == n )
+                    continue;
+                if( dBuffer_[static_cast<size_t>( m - dBufferStartAbsIndex_ )] >= dn )
+                    isPeak = false; // a taller (or exactly tied) neighbor wins
             }
 
-            lastDecidedAbsIndex_ = absIndex;
+            if( isPeak ) {
+                PeakEvent pe;
+                pe.sampleIndex = n; // already Kilosort-convention-aligned, no shift needed
+                pe.score       = dn;
+                peaks.push_back( pe );
+            }
+
+            lastDecidedAbsIndex_ = n;
+        }
+
+        // Nothing before (lastDecidedAbsIndex_ - minSeparationSamples_) can
+        // ever be referenced by a future window again -- trim it.
+        const long long trimBefore = lastDecidedAbsIndex_ - minSeparationSamples_;
+        while( !dBuffer_.empty() && dBufferStartAbsIndex_ < trimBefore ) {
+            dBuffer_.pop_front();
+            ++dBufferStartAbsIndex_;
         }
     }
 
