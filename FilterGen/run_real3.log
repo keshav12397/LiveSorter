@@ -1,0 +1,17 @@
+Sample rate: 29999.733951762522 Hz, saved channels: 385, sync chans: 1
+Restricting to 96 channels from D:/test_newsorter/rawData/shank1only.json
+Loaded data: 39598326 samples x 96 channels (30.4 GB)
+Target cluster 74: 1158 spikes total, 1158 used for template.
+Interferer cluster 67: 18126 spikes total, 2000 used.
+Interferer cluster 65: 23011 spikes total, 2000 used.
+Interferer cluster 82: 22307 spikes total, 2000 used.
+Interferer cluster 72: 18048 spikes total, 2000 used.
+Interferer cluster 57: 41091 spikes total, 2000 used.
+Selected channels (SpikeGLX indices): [203, 205, 201, 207, 202]
+Traceback (most recent call last):
+  File "C:\Users\kesha\OneDrive\Desktop\LiveSorter\FilterGen\generate_filter.py", line 638, in <module>
+    main()
+  File "C:\Users\kesha\OneDrive\Desktop\LiveSorter\FilterGen\generate_filter.py", line 571, in main
+    if interferer_times_all else target_spikes
+       ^^^^^^^^^^^^^^^^^^^^
+NameError: name 'interferer_times_all' is not defined. Did you mean: 'interferer_wfs_full'?

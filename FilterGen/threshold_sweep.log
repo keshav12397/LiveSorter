@@ -1,0 +1,33 @@
+Loading 39598326 samples x 96 channels...
+Loaded (30.4 GB)
+
+Train: [0, 19799163) (660.0s)   Test: [19799163, 39598326) (660.0s)
+
+============================================================
+Fitting LCMV on TRAIN split only...
+Constraint check -- gain on target: 1.0000 (want 1.0)
+  gain on interferer 67: -1.3184e-16 (want ~0)
+  gain on interferer 65: -9.0206e-17 (want ~0)
+  gain on interferer 82: -2.3419e-17 (want ~0)
+  gain on interferer 72: -7.6328e-17 (want ~0)
+  gain on interferer 57: -8.6736e-18 (want ~0)
+Selected channels: [203, 205, 201, 202, 207]
+
+Target: 512 train spikes, 646 test spikes
+Interferer 67: 10066 test spikes
+Interferer 65: 13959 test spikes
+Interferer 82: 12600 test spikes
+Interferer 72: 9579 test spikes
+Interferer 57: 23338 test spikes
+
+Computing filter output on held-out test split...
+Finding all candidate detections (local maxima) in test output...
+Found 480431 candidate peaks in test split.
+
+Sweeping 60 threshold values...
+
+Best F1 operating point: threshold=0.7057  recall=97.06%  precision=99.21%  F1=0.981  FP_rate=0.01/s
+Best recall with FP rate <= 1/s: threshold=0.4314  recall=99.85%  FP_rate=0.83/s
+
+Saved plot to D:/test_newsorter/filters_out\threshold_sweep_74.png
+Saved curve data to D:/test_newsorter/filters_out\threshold_sweep_74.npz

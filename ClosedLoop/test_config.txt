@@ -1,0 +1,25 @@
+# Test config for calibration cross-check against the real dataset used
+# throughout this session's Python work (FilterGen/).
+sglxHost=localhost
+sglxPort=4142
+filterDir=D:/test_newsorter/filters_out
+targetId=74
+templateLength=61
+skipCalibration=false
+trainingBinPath=D:/test_newsorter/rawData/Lav69_d1.0_g0_tcat.imec0.ap.bin
+trainingKsDir=D:/test_newsorter/ks_out
+calibrationLogPath=D:/test_newsorter/filters_out/cpp_calibration_log_74.csv
+calibrationCriterion=best_f1
+maxFalsePositiveRateHz=1.0
+fetchChunkMs=5
+niSyncBit=0
+niSyllableLines=5,6,7
+niDebounceSamples=10
+imecSyncBit=6
+windowStartMs=0
+windowEndMs=100
+spikeCountThreshold=3
+doLine=Dev4/port0/line5
+doPulseMs=50
+spikeTimesPath=D:/test_newsorter/spikeTimes_cpp_test.txt
+decisionLogPath=D:/test_newsorter/decisions_cpp_test.log

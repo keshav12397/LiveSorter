@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <thread>
 #include <chrono>
+#include <vector>
+
 using namespace std;
 
 static const char*  addr = "129.236.161.4";
@@ -16,6 +18,7 @@ static int          port = 4142;
 
 // Fetch loop for one stream, run on its own thread with its own handle.
 //
+
 static void fetchLoop( void *hSglx, const char *tag, int js, int ip, int nIters )
 {
     double  srate = sglx_getStreamSampleRate( hSglx, js, ip );
@@ -52,7 +55,6 @@ static void fetchLoop( void *hSglx, const char *tag, int js, int ip, int nIters 
         this_thread::sleep_for( chrono::milliseconds( 300 ) );
     }
 }
-
 
 void testDualHandle()
 {
@@ -94,3 +96,5 @@ void testDualHandle()
 
     printf( "\nDone.\n" );
 }
+
+

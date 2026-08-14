@@ -30,6 +30,41 @@
             ]
         },
         {
+            "label": "build closed loop",
+            "type": "shell",
+            "command": "cl.exe",
+            "args": [
+                "/EHsc",
+                "/std:c++17",
+                "/Zi",
+                "/Fe:ClosedLoop.exe",
+                "ClosedLoop/main.cpp",
+                "ClosedLoop/Config.cpp",
+                "ClosedLoop/SglxMetaReader.cpp",
+                "ClosedLoop/FilterBank.cpp",
+                "ClosedLoop/ConvolutionEngine.cpp",
+                "ClosedLoop/Calibration.cpp",
+                "ClosedLoop/ImecFetchThread.cpp",
+                "ClosedLoop/NiFetchThread.cpp",
+                "ClosedLoop/DecisionThread.cpp",
+                "SDK/API/SglxCppClient.cpp",
+                "/I",
+                "SDK/API",
+                "/I",
+                "ClosedLoop",
+                "/link",
+                "/LIBPATH:SDK/API",
+                "libSglxApi.a"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "problemMatcher": [
+                "$msCompile"
+            ]
+        },
+        {
             "type": "cppbuild",
             "label": "C/C++: cl.exe build active file",
             "command": "cl.exe",

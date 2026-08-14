@@ -2,3 +2,7 @@
 *.obj
 *.pdb
 *.ilk
+*.bin
+*.pyc
+*.tsv
+*.meta

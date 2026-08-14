@@ -1,0 +1,45 @@
+# ClosedLoop config -- plain key=value, one per line, '#' starts a comment.
+# Copy this file, edit the copy, pass its path as ClosedLoop.exe's argv[1].
+
+# --- SpikeGLX connection -----------------------------------------------
+sglxHost=localhost
+sglxPort=4142
+
+# --- Filter (produced by FilterGen/generate_filter.py) ------------------
+filterDir=D:/test_newsorter/filters_out
+targetId=74
+templateLength=61
+
+# --- Calibration (Phase A) ----------------------------------------------
+# trainingBinPath MUST be the exact file Kilosort was run on -- see README.
+skipCalibration=false
+trainingBinPath=D:/test_newsorter/rawData/Lav69_d1.0_g0_tcat.imec0.ap.bin
+trainingKsDir=D:/test_newsorter/ks_out
+calibrationLogPath=D:/test_newsorter/filters_out/calibration_log_74.csv
+# "best_f1" or "best_recall_under_fp_rate"
+calibrationCriterion=best_f1
+# only used if calibrationCriterion=best_recall_under_fp_rate
+maxFalsePositiveRateHz=1.0
+
+# --- Fetch cadence --------------------------------------------------------
+fetchChunkMs=5
+
+# --- NI digital line conventions (verify against your wiring! see README) -
+niSyncBit=0
+niSyllableLines=5,6,7
+niDebounceSamples=10
+
+# --- IMEC digital line conventions ------------------------------------------
+# Per SpikeGLX manual: SY channel's sync waveform is bit 6 (NOT bit 0).
+imecSyncBit=6
+
+# --- Decision logic ---------------------------------------------------------
+windowStartMs=0
+windowEndMs=100
+spikeCountThreshold=3
+doLine=Dev4/port0/line5
+doPulseMs=50
+
+# --- Output -----------------------------------------------------------------
+spikeTimesPath=D:/test_newsorter/spikeTimes.txt
+decisionLogPath=D:/test_newsorter/decisions.log
