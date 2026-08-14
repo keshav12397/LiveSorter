@@ -1,0 +1,12 @@
+{
+  // "Build/" is leftover full source for SglxApi.dll itself (requires the
+  // SGLXAPI_LIBRARY macro from its own qmake project to compile correctly).
+  // It isn't part of the Demo build (see tasks.json), so keep IntelliSense
+  // from parsing/flagging it.
+  "files.exclude": {
+    "**/Build": true
+  },
+  "C_Cpp.files.exclude": {
+    "**/Build": true
+  }
+}
