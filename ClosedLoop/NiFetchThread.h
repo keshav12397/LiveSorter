@@ -1,6 +1,7 @@
 #ifndef CLOSEDLOOP_NIFETCHTHREAD_H
 #define CLOSEDLOOP_NIFETCHTHREAD_H
 
+#include <string>
 #include <vector>
 #include <thread>
 #include <atomic>
@@ -17,11 +18,16 @@
 // code *onset* (not continuously while a code is held -- see
 // fetchLoop()'s debounce/re-arm logic in the .cpp for exactly how a
 // repeated syllable after a return to code 0 is treated as a fresh event).
+// Every emitted event's syllable code and NI-stream sample index are also
+// appended to syllableTimesPath (one "code,sampleIndex" line per event,
+// mirroring ImecFetchThread's spikeTimesPath).
 class NiFetchThread {
 public:
+    // syllableTimesPath: pass "" to skip writing this file (queue-only).
     NiFetchThread( void *hSglx, int niSyncBit, const std::vector<int> &syllableLines,
                    int debounceSamples, int fetchChunkMs,
-                   ThreadSafeQueue<SyllableEvent> &syllableQueue );
+                   ThreadSafeQueue<SyllableEvent> &syllableQueue,
+                   const std::string &syllableTimesPath = "" );
 
     void start();
     void stop();
@@ -36,6 +42,7 @@ private:
     int   debounceSamples_;
     int   fetchChunkMs_;
     ThreadSafeQueue<SyllableEvent> &syllableQueue_;
+    std::string syllableTimesPath_;
 
     std::atomic<bool> stopFlag_;
     std::thread        thread_;

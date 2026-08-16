@@ -12,18 +12,52 @@ runs it against a live SpikeGLX session.
 
 ## Two phases, one binary
 
-1. **Calibration** (`Calibration.h/.cpp`): before connecting live, streams a
-   training `.bin` recording through the *same* `ConvolutionEngine` that
-   will run live, in the same `fetchChunkMs`-sized chunks, and sweeps
-   detection thresholds against that recording's Kilosort ground truth to
-   pick a validated operating threshold (best-F1 by default). Set
-   `skipCalibration=true` in the config to skip this and just use the
-   threshold already saved in `threshold_<id>.bin`.
+1. **Calibration**: before connecting live, (re)fits the LCMV filter on a
+   training `.bin` recording and picks a validated detection threshold
+   against that recording's Kilosort ground truth. Set `skipCalibration=true`
+   in the config to skip this and just use whatever's already saved in
+   `channels_<id>.bin`/`filter_<id>.bin`/`threshold_<id>.bin`.
 
    **Hard requirement**: `trainingBinPath` must be the *exact* file
    Kilosort was run on (`trainingKsDir`) -- calibration matches ground-truth
    spike times to raw-file byte offsets by sample index, so any mismatch
    between the two silently produces a meaningless threshold.
+
+   **Two backends, `calibrationBackend` in config:**
+   - **`python`** (default): `main.cpp` shells out to
+     `FilterGen/calibrate_for_closedloop.py`, which fits the LCMV filter on
+     the first `calibrationTrainFrac` of the recording, sweeps the threshold
+     against the held-out remainder, and writes the *train-split-fitted*
+     filter (not one refit on all the data afterward) + swept threshold to
+     `filterDir`. `main.cpp` then reloads `FilterBank` from those files. This
+     is the single implementation of "fit the filter"/"score a threshold" --
+     the same code `FilterGen/generate_filter.py` and
+     `FilterGen/threshold_sweep_real.py` use for offline design work.
+   - **`cpp`**: `Calibration.cpp`'s own from-scratch port of the same
+     fit+sweep math, kept as a fallback. **Prefer `python`** -- the `cpp`
+     path is a second implementation of the same logic that can (and did,
+     this session) silently drift out of sync with Python's, costing a long
+     debugging session to track down a ~50%-recall-cap bug that turned out
+     to be in the C++ port's peer-selection, not in the underlying algorithm.
+     Kept around mainly so calibration still works on a machine with no
+     Python/numpy/scipy available.
+
+   **Interferers** (nearby units the filter must null out, `python` backend
+   only): either list them explicitly (`interferers=67,65,82,...`, Kilosort
+   cluster ids) or set `autoInterferers=N` to have the script pick them
+   automatically via `generate_filter.py`'s
+   `auto_pick_interferers_spatial()`. `interferers`, if non-empty, always
+   wins. This is spatially aware, not just activity-ranked: it shortlists
+   the ~30 most active non-target/non-noise clusters (cheap), computes each
+   shortlisted candidate's own peak channel from a quick mean waveform over
+   the already-preprocessed data, and picks the N *physically closest* to
+   the target's own peak channel (using the channel-map JSON's `xc`/`yc` if
+   given, else index-distance within the channel group) -- not just the N
+   busiest clusters anywhere on the probe, which for a sparse target can
+   easily be spatially irrelevant. Validated against target 74's real data:
+   auto-pick independently reproduced the exact same 5 clusters
+   (`[67,65,72,82,57]`) that had been manually curated by inspection earlier
+   in this project, just in a different (distance-sorted) order.
 
 2. **Live** (`ImecFetchThread`, `NiFetchThread`, `DecisionThread`): three
    threads, each with its own SpikeGLX connection handle (never share a
@@ -38,7 +72,12 @@ runs it against a live SpikeGLX session.
    - `NiFetchThread` continuously fetches the NI digital-word (DW) channel,
      decodes a debounced 3-bit syllable code from lines 5/6/7, tracks the
      sync pulse on line 0, and reports syllable events (also as "seconds
-     since that stream's most recent sync edge") to `DecisionThread`.
+     since that stream's most recent sync edge") to `DecisionThread`, plus
+     writes every emitted event's code and NI-stream sample index to
+     `syllableTimesPath` (one `code,sampleIndex` line per event -- same
+     idea as `ImecFetchThread`'s `spikeTimesPath`, just CSV since there are
+     two fields instead of one). Leave `syllableTimesPath` blank to skip
+     writing this file (events still reach `DecisionThread` either way).
    - `DecisionThread` owns a third, dedicated handle purely for issuing
      `sglx_ni_DO_set` calls, counts recent spikes in the configured window
      after each syllable event, and raises/lowers the digital line.
@@ -65,12 +104,31 @@ preprocessing -- see either file's channel-index bookkeeping
 (`filterIndexWithinCarGroup`) for exactly how.
 
 The high-pass filter itself is a necessary approximation: `generate_filter.py`
-uses `scipy.signal.filtfilt` (zero-phase, needs samples from both before
-*and* after each point -- impossible live), so `ButterworthHighpass` uses a
-standard causal biquad (same cutoff/order, RBJ Audio-EQ-Cookbook formula)
-instead. Same frequency response shape, different phase -- acceptable for
-matching the *scale* of noise the filter was calibrated against, not meant
-to be sample-for-sample identical to Python's offline result.
+by default uses `scipy.signal.filtfilt` (zero-phase, needs samples from both
+before *and* after each point -- impossible live), while `ButterworthHighpass`
+uses a standard causal biquad (same cutoff/order, RBJ Audio-EQ-Cookbook
+formula, Q=1/sqrt(2)) instead. Same frequency response shape, different phase.
+
+**This phase difference is not just cosmetic -- it measurably degrades a
+filter trained on `filtfilt`-preprocessed data.** With CAR+highpass both
+correctly implemented as above, live/calibration recall still capped around
+45-63% (vs. Python's ~97%) regardless of threshold. The fix is to **train the
+filter itself on the same causal biquad the live pipeline uses**, not to try
+to make the live pipeline retroactively match `filtfilt` (impossible in true
+real time). `generate_filter.py` and `threshold_sweep_real.py` both take a
+`--causal-highpass` flag that swaps in `highpass_causal_biquad()` -- a
+coefficient-for-coefficient port of `ButterworthHighpass.h`, applied causally
+via `scipy.signal.lfilter` instead of `filtfilt` -- so the LCMV weights,
+channel selection, and threshold are all calibrated against exactly the
+signal statistics the live C++ code will actually see.
+`calibrate_for_closedloop.py` (the default `calibrationBackend=python` path,
+see above) always uses this causal biquad unconditionally -- there's no flag
+to turn it off there, since a filter trained any other way is only valid for
+offline/Python analysis, never for deployment against ClosedLoop. Confirmed
+to close the gap: causal-biquad-trained filter for target 74 recovered to
+recall=97.21%/precision=99.21% in Python's own held-out sweep, and
+recall=98.1%/precision=99.1% in the full C++ calibration pipeline against
+the same data.
 
 ## Cross-stream time alignment
 
@@ -104,16 +162,35 @@ implemented since it isn't needed here.
 FilterGen/generate_filter.py's `filter_output()` does (`np.convolve(...,
 mode='same')`), so a detection's reported sample index is directly
 comparable to Kilosort's own `spike_times.npy` -- no correction needed.
-This costs a small, fixed reporting delay (`(templateLength-1)/2` samples,
-~1ms at 30kHz for a 61-tap filter -- trivial against the 10ms budget): a
-detection can't be finalized until that many *future* samples have arrived
-in a later chunk. That's handled by the existing history buffer, reusing
-already-fetched samples instead of re-requesting overlapping data from the
-server. (An earlier version of this file used a causal-only, no-lookahead
-formula plus a hand-derived index correction instead -- computed that
-correction wrong, and it silently cratered Calibration's recall/precision
-against ground truth. Matching Python's formula exactly instead of
-re-deriving an equivalent one removes that whole class of bug.)
+This costs a small, fixed reporting delay: a detection at `n` can't be
+finalized until `rightMargin` future samples (`(templateLength-1)/2`) have
+arrived to compute D at `n`, *plus* `minSeparationSamples` more so the
+windowed peak decision (see below) has enough future score values to compare
+against -- ~2ms total at 30kHz for a 61-tap filter's defaults, trivial
+against the 10ms budget. That's handled by the existing history/score
+buffers, reusing already-fetched samples instead of re-requesting
+overlapping data from the server. (An earlier version of this file used a
+causal-only, no-lookahead formula plus a hand-derived index correction
+instead -- computed that correction wrong, and it silently cratered
+Calibration's recall/precision against ground truth. Matching Python's
+formula exactly instead of re-deriving an equivalent one removes that whole
+class of bug.)
+
+**Peak selection is proper windowed non-max suppression, not greedy
+left-to-right.** A detection at `n` is accepted only if its score is the
+tallest within `[n-minSeparationSamples, n+minSeparationSamples]` --
+matching `scipy.signal.find_peaks(distance=...)`'s actual semantics. An
+earlier version instead accepted the first strict local maximum that was
+simply "far enough past the *last accepted* peak" -- which let a small
+spurious side-lobe a few samples *before* a real spike's true, taller peak
+claim the exclusion zone first and silently discard the real detection. This
+was diagnosed from calibration recall capping around 45-63% *even at the
+loosest possible threshold* (accepting virtually every candidate score) --
+a pattern only explainable by genuine spikes never reaching the candidate
+list at all, not by a scoring/thresholding problem. Fixing this (plus the
+causal-highpass retrain above) brought calibration to
+recall=98.1%/precision=99.1%/F1=0.986 against the real training set,
+matching Python's own held-out benchmark.
 
 ## Concurrency rules (do not violate)
 

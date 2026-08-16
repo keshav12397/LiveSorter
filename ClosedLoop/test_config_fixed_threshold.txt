@@ -21,4 +21,5 @@ spikeCountThreshold=3
 doLine=Dev4/port0/line5
 doPulseMs=50
 spikeTimesPath=D:/test_newsorter/spikeTimes_cpp_test.txt
+syllableTimesPath=D:/test_newsorter/syllableTimes_cpp_test.txt
 decisionLogPath=D:/test_newsorter/decisions_cpp_test.log

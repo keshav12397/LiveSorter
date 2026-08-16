@@ -3,6 +3,7 @@
 #include <iostream>
 #include <chrono>
 #include <algorithm>
+#include <fstream>
 
 #include "SglxCppClient.h"
 #include "DigitalWordUtils.h"
@@ -15,10 +16,12 @@ namespace {
 
 NiFetchThread::NiFetchThread( void *hSglx, int niSyncBit, const std::vector<int> &syllableLines,
                                int debounceSamples, int fetchChunkMs,
-                               ThreadSafeQueue<SyllableEvent> &syllableQueue )
+                               ThreadSafeQueue<SyllableEvent> &syllableQueue,
+                               const std::string &syllableTimesPath )
     :   hSglx_( hSglx ), syncBit_( niSyncBit ), syllableLines_( syllableLines ),
         debounceSamples_( debounceSamples ), fetchChunkMs_( fetchChunkMs ),
-        syllableQueue_( syllableQueue ), stopFlag_( false )
+        syllableQueue_( syllableQueue ), syllableTimesPath_( syllableTimesPath ),
+        stopFlag_( false )
 {}
 
 
@@ -29,6 +32,13 @@ void NiFetchThread::join()  { if( thread_.joinable() ) thread_.join(); }
 
 void NiFetchThread::fetchLoop()
 {
+    std::ofstream syllableTimesFile;
+    if( !syllableTimesPath_.empty() ) {
+        syllableTimesFile.open( syllableTimesPath_.c_str(), std::ios::app );
+        if( !syllableTimesFile.is_open() )
+            std::cerr << "NiFetchThread: could not open '" << syllableTimesPath_ << "' for writing\n";
+    }
+
     double sampleRate = sglx_getStreamSampleRate( hSglx_, kNiJs, kNiIp );
     if( sampleRate <= 0 ) {
         std::cerr << "NiFetchThread: sglx_getStreamSampleRate failed: "
@@ -116,6 +126,11 @@ void NiFetchThread::fetchLoop()
                     ev.sampleIndex  = candidateStartIdx;
                     ev.timeRelSyncS = syncTracker.secondsSinceLastEdge( candidateStartIdx );
                     syllableQueue_.push( ev );
+
+                    if( syllableTimesFile.is_open() ) {
+                        syllableTimesFile << ev.code << "," << ev.sampleIndex << "\n";
+                        syllableTimesFile.flush();
+                    }
                 }
                 // Re-arm regardless of whether we emitted (code==0 "rest"
                 // stabilizing also updates lastEmittedCode, so a repeated

@@ -139,6 +139,20 @@ def load_channel_map_json(path):
     return np.array(j["chanMap"], dtype=int)
 
 
+def load_channel_positions_json(path):
+    """Same file as load_channel_map_json(), but returns {raw_channel_id:
+    (x, y)} from the 'xc'/'yc' arrays (indexed in parallel with 'chanMap') --
+    used for auto_pick_interferers_spatial()'s physical-distance ranking.
+    Returns {} if the file has no 'xc'/'yc' fields."""
+    import json
+    with open(path) as fh:
+        j = json.load(fh)
+    if "xc" not in j or "yc" not in j:
+        return {}
+    chan_map = j["chanMap"]
+    return {int(c): (float(x), float(y)) for c, x, y in zip(chan_map, j["xc"], j["yc"])}
+
+
 def find_sync_channel_count(meta):
     # snsApLfSy = "<ap>,<lf>,<sy>"
     parts = meta.get("snsApLfSy", "0,0,0").split(",")
@@ -268,7 +282,15 @@ def select_channels(target_wf, interferer_wfs, n_channels, eps=1e-9):
 
 def auto_pick_interferers(spike_t, spike_cl, target_id, labels, n_interferers):
     """Pick the n most active *other* clusters as interferers (excluding
-    anything labeled 'noise'), by raw spike count."""
+    anything labeled 'noise'), by raw spike count.
+
+    Not spatially aware -- see auto_pick_interferers_spatial() for a version
+    that only considers clusters actually near the target's own channels,
+    which matters a lot for a sparse/poorly-isolated target: the busiest
+    clusters probe-wide are often nowhere near it and don't interfere with
+    it at all, while a much less active but spatially adjacent cluster can
+    dominate its channels.
+    """
     ids, counts = np.unique(spike_cl, return_counts=True)
     order = np.argsort(counts)[::-1]
 
@@ -282,6 +304,70 @@ def auto_pick_interferers(spike_t, spike_cl, target_id, labels, n_interferers):
         picked.append(cid)
         if len(picked) == n_interferers:
             break
+    return picked
+
+
+def auto_pick_interferers_spatial(data, spike_t, spike_cl, np_ch, target_id, labels,
+                                   n_interferers, template_length=61, template_offset=20,
+                                   pool_size=None, peak_check_spikes=200,
+                                   channel_positions=None, rng=None):
+    """Spatially-aware version of auto_pick_interferers(): only picks
+    interferers whose own peak channel is physically close to the target's,
+    instead of just the busiest clusters anywhere on the probe.
+
+    Two-stage to stay fast: first narrows to a `pool_size` (default
+    max(3*n_interferers, 30)) shortlist by raw activity (cheap, like
+    auto_pick_interferers()), then -- only for that shortlist -- computes a
+    quick mean waveform (small `peak_check_spikes` subsample, not the full
+    `max_spikes` used for the final fit) over `data`/`np_ch` (already
+    restricted to the target's own channel group, e.g. one shank) to find
+    each candidate's peak channel, and ranks the shortlist by distance from
+    the target's own peak channel. `channel_positions`, if given, is a dict
+    mapping raw channel id -> (x, y) (see generate_filter's
+    --channel-map-json handling) for true physical distance; without it,
+    falls back to index-distance within `np_ch` (fine when np_ch is a
+    single, contiguous shank, as it usually is here).
+    """
+    rng = rng or np.random.default_rng()
+    if pool_size is None:
+        pool_size = max(3 * n_interferers, 30)
+
+    ids, counts = np.unique(spike_cl, return_counts=True)
+    order = np.argsort(counts)[::-1]
+
+    pool = []
+    for idx in order:
+        cid = int(ids[idx])
+        if cid == target_id:
+            continue
+        if labels.get(cid, "").lower() == "noise":
+            continue
+        pool.append(cid)
+        if len(pool) == pool_size:
+            break
+
+    def peak_channel_and_pos(spike_times):
+        wf, _ = mean_waveform(data, spike_times, template_length, template_offset,
+                               max_spikes=peak_check_spikes, rng=rng)
+        peak_local = int(np.argmax(np.ptp(wf, axis=0)))  # index within np_ch
+        raw_ch = int(np_ch[peak_local])
+        if channel_positions is not None and raw_ch in channel_positions:
+            return channel_positions[raw_ch]
+        return (float(peak_local), 0.0)  # fallback: index-distance only
+
+    target_pos = peak_channel_and_pos(spike_t[spike_cl == target_id])
+
+    scored = []
+    for cid in pool:
+        try:
+            pos = peak_channel_and_pos(spike_t[spike_cl == cid])
+        except ValueError:
+            continue  # too few/edge-clipped spikes to form a waveform -- skip
+        dist = np.hypot(pos[0] - target_pos[0], pos[1] - target_pos[1])
+        scored.append((dist, cid))
+
+    scored.sort(key=lambda x: x[0])
+    picked = [cid for _, cid in scored[:n_interferers]]
     return picked
 
 

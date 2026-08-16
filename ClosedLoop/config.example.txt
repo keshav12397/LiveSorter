@@ -22,8 +22,46 @@ highpassCutoffHz=300
 # --- Calibration (Phase A) ----------------------------------------------
 # trainingBinPath MUST be the exact file Kilosort was run on -- see README.
 skipCalibration=false
+
+# "python" (default) shells out to FilterGen/calibrate_for_closedloop.py --
+# fits the LCMV filter + sweeps the threshold in the one Python
+# implementation this whole project's channel-selection/filter/threshold
+# math actually lives in, then (re)writes channels_<id>.bin/filter_<id>.bin/
+# threshold_<id>.bin for FilterBank to load. "cpp" uses Calibration.cpp's
+# from-scratch C++ port instead (kept as a fallback -- see README).
+calibrationBackend=python
 trainingBinPath=D:/test_newsorter/rawData/Lav69_d1.0_g0_tcat.imec0.ap.bin
 trainingKsDir=D:/test_newsorter/ks_out
+
+# --- calibrationBackend=python settings ----------------------------------
+# Use the FULL path to the interpreter that has numpy/scipy installed (e.g.
+# a conda env's python.exe) -- ClosedLoop.exe won't inherit your shell's
+# conda activation, so a bare "python" may silently resolve to the wrong
+# interpreter (or none) depending on how it's launched.
+pythonExe=C:/Users/kesha/anaconda3/envs/kilosort/python.exe
+calibrationScript=FilterGen/calibrate_for_closedloop.py
+# targetId above (in the Filter section) is passed straight through as
+# --target -- no separate key needed here.
+#
+# Interferers: either list explicit Kilosort cluster ids to null out, OR
+# leave `interferers` blank and set autoInterferers to a count to have the
+# script auto-pick the N most active *other* (non-noise) clusters by raw
+# spike count instead (generate_filter.py's auto_pick_interferers()).
+# `interferers`, if non-empty, always takes priority over autoInterferers.
+interferers=67,65,82,72,57
+#autoInterferers=5
+filterNChannels=5
+templateOffset=20
+# Fit on the first calibrationTrainFrac of trainingBinPath, sweep/validate
+# threshold on the held-out remainder -- the *train-split* filter is what
+# gets deployed (not refit on all the data afterward -- see the Python
+# script's docstring for why that matters).
+calibrationTrainFrac=0.5
+calibrationRidge=1e-3
+calibrationMaxSpikes=2000
+calibrationSeed=0
+
+# --- calibrationBackend=cpp settings (ignored for the python backend) ----
 calibrationLogPath=D:/test_newsorter/filters_out/calibration_log_74.csv
 # "best_f1" or "best_recall_under_fp_rate"
 calibrationCriterion=best_f1
@@ -51,4 +89,8 @@ doPulseMs=50
 
 # --- Output -----------------------------------------------------------------
 spikeTimesPath=D:/test_newsorter/spikeTimes.txt
+# One "code,sampleIndex" line per debounced syllable-code onset (NI-stream
+# sample index -- same convention as SyllableEvent.sampleIndex). Leave blank
+# to skip writing this file (events still reach DecisionThread either way).
+syllableTimesPath=D:/test_newsorter/syllableTimes.txt
 decisionLogPath=D:/test_newsorter/decisions.log

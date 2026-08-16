@@ -4,9 +4,12 @@
 // =================================
 
 #include <iostream>
+#include <sstream>
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <cstdlib>
+#include <stdexcept>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -37,6 +40,70 @@ BOOL WINAPI consoleCtrlHandler( DWORD ctrlType )
     return FALSE;
 }
 #endif
+
+// Shells out to FilterGen/calibrate_for_closedloop.py, which fits the LCMV
+// filter on a training split, sweeps the detection threshold against the
+// held-out remainder's Kilosort ground truth, and writes
+// channels_<id>.bin/filter_<id>.bin/threshold_<id>.bin -- see README's
+// "Calibration via Python" section for why this replaced a from-scratch C++
+// port of the same fit+sweep math (Calibration.cpp remains as an opt-in
+// fallback via calibrationBackend=cpp). Throws std::runtime_error if the
+// script exits nonzero, so main()'s catch block aborts startup cleanly.
+void runPythonCalibration( const Config &cfg, int targetId, const std::string &filterDir )
+{
+    std::string      pythonExe    = cfg.getString( "pythonExe", "python" );
+    std::string      script       = cfg.getString( "calibrationScript",
+                                         "FilterGen/calibrate_for_closedloop.py" );
+    std::vector<int> interferers  = cfg.getIntList( "interferers" );
+    int              autoInterferers = cfg.getInt( "autoInterferers", 0 );
+
+    if( interferers.empty() && autoInterferers <= 0 )
+        throw std::runtime_error(
+            "runPythonCalibration: config needs either 'interferers' "
+            "(comma-separated Kilosort cluster ids of nearby units to null "
+            "out) or 'autoInterferers' (a count to auto-pick by activity) "
+            "when skipCalibration=false and calibrationBackend=python" );
+
+    std::ostringstream cmd;
+    cmd << "\"" << pythonExe << "\""
+        << " \"" << script << "\""
+        << " --ks-dir \""   << cfg.requireString( "trainingKsDir" )  << "\""
+        << " --bin-path \"" << cfg.requireString( "trainingBinPath" ) << "\""
+        << " --target " << targetId;
+
+    // Explicit list takes priority; otherwise let the script auto-pick the
+    // N most active other (non-noise) clusters -- see
+    // generate_filter.py's auto_pick_interferers().
+    if( !interferers.empty() ) {
+        cmd << " --interferers";
+        for( size_t i = 0; i < interferers.size(); ++i )
+            cmd << " " << interferers[i];
+    }
+    else {
+        cmd << " --auto-interferers " << autoInterferers;
+    }
+
+    std::string carJson = cfg.getString( "carChannelMapJson", "" );
+    if( !carJson.empty() )
+        cmd << " --channel-map-json \"" << carJson << "\"";
+
+    cmd << " --n-channels "      << cfg.getInt( "filterNChannels", 5 )
+        << " --template-length " << cfg.getInt( "templateLength", 61 )
+        << " --template-offset " << cfg.getInt( "templateOffset", 20 )
+        << " --train-frac "      << cfg.getDouble( "calibrationTrainFrac", 0.5 )
+        << " --ridge "           << cfg.getDouble( "calibrationRidge", 1e-3 )
+        << " --max-spikes "      << cfg.getInt( "calibrationMaxSpikes", 2000 )
+        << " --fc "              << cfg.getDouble( "highpassCutoffHz", 300.0 )
+        << " --out-dir \""       << filterDir << "\""
+        << " --seed "            << cfg.getInt( "calibrationSeed", 0 );
+
+    std::cout << "Running: " << cmd.str() << "\n";
+
+    int rc = std::system( cmd.str().c_str() );
+    if( rc != 0 )
+        throw std::runtime_error(
+            "FilterGen/calibrate_for_closedloop.py exited with code " + std::to_string( rc ) );
+}
 
 } // namespace
 
@@ -75,30 +142,56 @@ int main( int argc, char **argv )
                   << "initial threshold=" << filterBank.threshold << "\n";
 
         // ---- Phase A: calibration -----------------------------------------
+        // Default backend shells out to Python (see runPythonCalibration()
+        // above / README's "Calibration via Python" section); set
+        // calibrationBackend=cpp to use Calibration.cpp's from-scratch C++
+        // port instead (kept as a fallback, not the default -- it's a
+        // second implementation of the same fit+sweep math that can drift
+        // out of sync with Python, which is exactly what caused this
+        // session's earlier ~50%-recall-cap bug hunt).
+        std::string calibrationBackend = cfg.getString( "calibrationBackend", "python" );
+
         if( !cfg.getBool( "skipCalibration", false ) ) {
 
-            std::cout << "Running calibration against training data...\n";
+            if( calibrationBackend == "python" ) {
 
-            Calibration::Result calib = Calibration::run(
-                cfg.requireString( "trainingBinPath" ),
-                cfg.requireString( "trainingKsDir" ),
-                targetId,
-                filterBank,
-                carChannelMapJson,
-                applyHighpass,
-                highpassCutoffHz,
-                cfg.getInt( "fetchChunkMs", 5 ),
-                cfg.getString( "calibrationCriterion", "best_f1" ),
-                cfg.getDouble( "maxFalsePositiveRateHz", 1.0 ),
-                cfg.getString( "calibrationLogPath", "" ) );
+                std::cout << "Running Python calibration (FilterGen/calibrate_for_closedloop.py)...\n";
+                runPythonCalibration( cfg, targetId, filterDir );
 
-            filterBank.threshold = calib.bestThreshold;
+                // Python just overwrote channels_<id>.bin/filter_<id>.bin/
+                // threshold_<id>.bin on disk -- reload so the in-memory
+                // FilterBank reflects the freshly fitted filter, not the
+                // (possibly stale) one loaded above.
+                filterBank = FilterBank::load( filterDir, targetId, templateLength );
 
-            std::cout << "Calibration done: threshold=" << calib.bestThreshold
-                      << "  recall="    << calib.bestPoint.recall
-                      << "  precision=" << calib.bestPoint.precision
-                      << "  f1="        << calib.bestPoint.f1
-                      << "  fpRateHz="  << calib.bestPoint.fpRateHz << "\n";
+                std::cout << "Calibration done: threshold=" << filterBank.threshold
+                          << " (" << filterBank.nChannels() << " channels)\n";
+            }
+            else {
+
+                std::cout << "Running C++ calibration against training data...\n";
+
+                Calibration::Result calib = Calibration::run(
+                    cfg.requireString( "trainingBinPath" ),
+                    cfg.requireString( "trainingKsDir" ),
+                    targetId,
+                    filterBank,
+                    carChannelMapJson,
+                    applyHighpass,
+                    highpassCutoffHz,
+                    cfg.getInt( "fetchChunkMs", 5 ),
+                    cfg.getString( "calibrationCriterion", "best_f1" ),
+                    cfg.getDouble( "maxFalsePositiveRateHz", 1.0 ),
+                    cfg.getString( "calibrationLogPath", "" ) );
+
+                filterBank.threshold = calib.bestThreshold;
+
+                std::cout << "Calibration done: threshold=" << calib.bestThreshold
+                          << "  recall="    << calib.bestPoint.recall
+                          << "  precision=" << calib.bestPoint.precision
+                          << "  f1="        << calib.bestPoint.f1
+                          << "  fpRateHz="  << calib.bestPoint.fpRateHz << "\n";
+            }
         }
         else {
             std::cout << "skipCalibration=true -- using threshold from threshold_"
@@ -144,7 +237,8 @@ int main( int argc, char **argv )
             cfg.getIntList( "niSyllableLines" ),
             cfg.getInt( "niDebounceSamples", 10 ),
             cfg.getInt( "fetchChunkMs", 5 ),
-            syllableQueue );
+            syllableQueue,
+            cfg.getString( "syllableTimesPath", "" ) );
 
         DecisionThread decisionThread(
             hDO, spikeQueue, syllableQueue,

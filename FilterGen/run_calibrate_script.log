@@ -1,0 +1,18 @@
+Loading 39598326 samples x 96 channels...
+Loaded (30.4 GB)
+Using causal RBJ biquad highpass (matches C++ live pipeline exactly)
+Train: [0, 19799163) (660.0s)   Test: [19799163, 39598326) (660.0s)
+Fitting LCMV on TRAIN split (causal high-pass)...
+Constraint check -- gain on target: 1.0000 (want 1.0)
+  gain on interferer 67: -1.1796e-16 (want ~0)
+  gain on interferer 65: -3.8164e-17 (want ~0)
+  gain on interferer 82: -1.0408e-17 (want ~0)
+  gain on interferer 72: 7.3552e-16 (want ~0)
+  gain on interferer 57: 5.8981e-17 (want ~0)
+Selected channels: [203, 205, 201, 202, 207]
+Target: 512 train spikes, 646 test spikes
+Scoring held-out test split against this exact train-fitted filter...
+Found 481258 candidate peaks in test split.
+Best F1 operating point: threshold=0.705191  recall=97.21%  precision=99.21%  F1=0.982  FP_rate=0.0076/s
+Saved channels_74.bin / filter_74.bin / threshold_74.bin to D:/test_newsorter/filters_out_test
+EXIT=0
