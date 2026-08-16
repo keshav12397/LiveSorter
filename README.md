@@ -1,4 +1,4 @@
-# ClosedLoop
+# ClosedLoop LiveSorter
 
 Real-time, sub-10ms closed-loop app: detects spikes from a single target
 neuron in the live IMEC stream, detects syllable-code events in the live NI
