@@ -230,11 +230,6 @@ int main( int argc, char **argv )
         bool        applyHighpass     = cfg.getBool( "applyHighpass", true );
         double      highpassCutoffHz  = cfg.getDouble( "highpassCutoffHz", 300.0 );
 
-        FilterBank filterBank = FilterBank::load( filterDir, targetId, templateLength );
-        std::cout << "Loaded filter for target " << targetId << ": "
-                  << filterBank.nChannels() << " channels, "
-                  << "initial threshold=" << filterBank.threshold << "\n";
-
         // ---- Phase A: calibration -----------------------------------------
         // Default backend shells out to Python (see runPythonCalibration()
         // above / README's "Calibration via Python" section); set
@@ -244,18 +239,35 @@ int main( int argc, char **argv )
         // out of sync with Python, which is exactly what caused this
         // session's earlier ~50%-recall-cap bug hunt).
         std::string calibrationBackend = cfg.getString( "calibrationBackend", "python" );
+        bool        skipCalibration    = cfg.getBool( "skipCalibration", false );
 
-        if( !cfg.getBool( "skipCalibration", false ) ) {
+        // The python backend regenerates channels_/filter_/threshold_<id>.bin
+        // from scratch and doesn't read the existing ones -- so filterDir
+        // doesn't need to already contain a filter for this targetId in that
+        // case. Only skipCalibration (uses the files as-is) and the cpp
+        // backend (only sweeps threshold; needs the existing channels/taps
+        // as its starting point) require the pre-run load below.
+        FilterBank filterBank;
+        bool       needInitialLoad = skipCalibration || calibrationBackend != "python";
+
+        if( needInitialLoad ) {
+            filterBank = FilterBank::load( filterDir, targetId, templateLength );
+            std::cout << "Loaded filter for target " << targetId << ": "
+                      << filterBank.nChannels() << " channels, "
+                      << "initial threshold=" << filterBank.threshold << "\n";
+        }
+
+        if( !skipCalibration ) {
 
             if( calibrationBackend == "python" ) {
 
                 std::cout << "Running Python calibration (FilterGen/calibrate_for_closedloop.py)...\n";
                 runPythonCalibration( cfg, targetId, filterDir );
 
-                // Python just overwrote channels_<id>.bin/filter_<id>.bin/
-                // threshold_<id>.bin on disk -- reload so the in-memory
-                // FilterBank reflects the freshly fitted filter, not the
-                // (possibly stale) one loaded above.
+                // Python just wrote channels_<id>.bin/filter_<id>.bin/
+                // threshold_<id>.bin on disk (from scratch, if this is the
+                // first run) -- load so the in-memory FilterBank reflects
+                // the freshly fitted filter.
                 filterBank = FilterBank::load( filterDir, targetId, templateLength );
 
                 std::cout << "Calibration done: threshold=" << filterBank.threshold
