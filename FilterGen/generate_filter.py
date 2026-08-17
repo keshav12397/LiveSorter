@@ -68,7 +68,7 @@ from scipy.linalg import toeplitz
 def load_kilosort(ks_dir):
     """Load spike_times.npy / spike_clusters.npy, plus optional labels."""
     spike_t = np.load(os.path.join(ks_dir, "spike_times.npy")).ravel().astype(np.int64)
-    spike_cl = np.load(os.path.join(ks_dir, "spike_clusters.npy")).ravel().astype(np.int64)
+    spike_cl = np.load(os.path.join(ks_dir, "spike_templates.npy")).ravel().astype(np.int64)
 
     keep = spike_t >= 0
     spike_t, spike_cl = spike_t[keep], spike_cl[keep]

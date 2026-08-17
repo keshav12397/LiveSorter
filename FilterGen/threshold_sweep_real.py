@@ -50,8 +50,19 @@ def load_and_prepare(args, rng):
     last_spike = spike_t.max()
     t_max_samples = int(min(raw.shape[0], last_spike + fs))
     print(f"Loading {t_max_samples} samples x {len(keep_idx)} channels...")
-    data = np.asarray(raw[:t_max_samples, keep_idx], dtype=np.float64)
-    print(f"Loaded ({data.nbytes / 1e9:.1f} GB)")
+
+    # Copied in chunks (rather than one `raw[:t_max_samples, keep_idx]` fancy
+    # index + astype) so there's a progress readout on large recordings, and
+    # so peak memory is the final float64 array plus one small int16 chunk
+    # instead of a full-size int16 temporary coexisting with the float64 one.
+    data = np.empty((t_max_samples, len(keep_idx)), dtype=np.float64)
+    chunk_samples = 2_000_000
+    for start in range(0, t_max_samples, chunk_samples):
+        end = min(start + chunk_samples, t_max_samples)
+        data[start:end] = raw[start:end, keep_idx]
+        pct = 100.0 * end / t_max_samples
+        print(f"\r  {end}/{t_max_samples} samples ({pct:5.1f}%)", end="", flush=True)
+    print(f"\nLoaded ({data.nbytes / 1e9:.1f} GB)")
 
     if args.filter:
         if args.causal_highpass:
