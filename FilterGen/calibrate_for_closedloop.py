@@ -39,9 +39,134 @@ import os
 import sys
 
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")  # headless -- this runs as a subprocess of ClosedLoop.exe
+import matplotlib.pyplot as plt
 
 import generate_filter as gf
 import threshold_sweep_real as tsr
+
+
+# --------------------------------------------------------------------- #
+# Plots -- always saved on a successful run, next to the .bin files, so
+# there's no separate step to remember to visually sanity-check a
+# calibration. Two files:
+#   template_filter_<id>.png   -- per-channel template waveform + filter
+#                                  taps used to fit it, plus an example
+#                                  segment of the held-out convolved trace
+#                                  with detections and true spikes marked.
+#   threshold_sweep_<id>.png   -- recall/precision/F1/FP-rate vs threshold,
+#                                  same layout threshold_sweep_real.py's
+#                                  standalone sweeps already produce.
+# --------------------------------------------------------------------- #
+
+def plot_template_and_detections(out_dir, target_id, f, sel_channels, template_wf,
+                                  template_length, D_test, peak_idx, peak_scores,
+                                  best_threshold, target_test_rel, fs, window_s=0.15):
+    """f, template_wf: (template_length, n_channels_selected) -- filter taps
+    and the target's own mean waveform on the SAME selected channels, so
+    they're directly comparable column-for-column. Two separate columns
+    (not overlaid / dual-axis) since amplitude and filter-weight are
+    different units -- see dataviz guidance on never dual-axis a chart."""
+    n_ch = len(sel_channels)
+    t_ms = (np.arange(template_length) - template_length // 2) / fs * 1000.0
+
+    fig = plt.figure(figsize=(11, 2.1 * n_ch + 3))
+    gs = fig.add_gridspec(n_ch + 1, 2, height_ratios=[1] * n_ch + [1.4])
+
+    for i, ch in enumerate(sel_channels):
+        ax_wf = fig.add_subplot(gs[i, 0])
+        ax_wf.plot(t_ms, template_wf[:, i], color="tab:blue", lw=1.5)
+        ax_wf.axhline(0, color="0.85", lw=0.8, zorder=0)
+        ax_wf.set_ylabel(f"ch {ch}\n(uV-ish)", fontsize=8)
+        if i == 0:
+            ax_wf.set_title("Target mean waveform (train split)")
+        if i == n_ch - 1:
+            ax_wf.set_xlabel("ms from spike center")
+
+        ax_f = fig.add_subplot(gs[i, 1])
+        ax_f.plot(t_ms, f[:, i], color="tab:purple", lw=1.5)
+        ax_f.axhline(0, color="0.85", lw=0.8, zorder=0)
+        ax_f.set_ylabel("weight", fontsize=8)
+        if i == 0:
+            ax_f.set_title("LCMV filter taps (this channel)")
+        if i == n_ch - 1:
+            ax_f.set_xlabel("ms from spike center")
+
+    # Example segment of the held-out convolved trace, centered on the
+    # first true target spike in the test split (falls back to t=0 if the
+    # test split has no target spikes at all).
+    ax_trace = fig.add_subplot(gs[n_ch, :])
+    center = int(target_test_rel[0]) if len(target_test_rel) else 0
+    half_w = int(window_s * fs)
+    lo, hi = max(0, center - half_w), min(len(D_test), center + half_w)
+    t_trace_ms = (np.arange(lo, hi) - center) / fs * 1000.0
+
+    ax_trace.plot(t_trace_ms, D_test[lo:hi], color="tab:blue", lw=1, label="convolved trace")
+    ax_trace.axhline(best_threshold, color="k", ls="--", lw=1, label=f"threshold={best_threshold:.3f}")
+
+    in_window = (peak_idx >= lo) & (peak_idx < hi) & (peak_scores > best_threshold)
+    ax_trace.scatter((peak_idx[in_window] - center) / fs * 1000.0, peak_scores[in_window],
+                      color="tab:red", zorder=5, s=30, label="detected spike")
+
+    true_in_window = target_test_rel[(target_test_rel >= lo) & (target_test_rel < hi)]
+    for k, tt in enumerate(true_in_window):
+        ax_trace.axvline((tt - center) / fs * 1000.0, color="tab:green", lw=1, alpha=0.6,
+                          label="true spike (Kilosort)" if k == 0 else None)
+
+    ax_trace.set_xlabel("ms")
+    ax_trace.set_ylabel("matched-filter score")
+    ax_trace.set_title("Example detection window (held-out test split)")
+    ax_trace.legend(loc="upper right", fontsize=8)
+
+    fig.suptitle(f"Cluster {target_id}: template / filter / example detections")
+    plt.tight_layout()
+    out_png = os.path.join(out_dir, f"template_filter_{target_id}.png")
+    plt.savefig(out_png, dpi=150)
+    plt.close(fig)
+    print(f"Saved plot to {out_png}")
+
+
+def plot_threshold_sweep(out_dir, target_id, thresholds, recall, precision, f1,
+                          fp_rate_hz, best_idx, test_duration_s, n_target_test):
+    """Same layout as threshold_sweep_real.py's standalone sweep plot."""
+    fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+
+    axes[0, 0].plot(thresholds, recall, label="recall (hit rate)", color="tab:green")
+    axes[0, 0].plot(thresholds, 1 - recall, label="miss rate (FN)", color="tab:red")
+    axes[0, 0].axvline(thresholds[best_idx], color="k", ls="--", lw=1, label="best F1")
+    axes[0, 0].set_xlabel("threshold")
+    axes[0, 0].set_ylabel("fraction of target test spikes")
+    axes[0, 0].set_title("Recall / Miss rate vs threshold")
+    axes[0, 0].legend()
+
+    axes[0, 1].plot(thresholds, fp_rate_hz, color="tab:orange")
+    axes[0, 1].axvline(thresholds[best_idx], color="k", ls="--", lw=1)
+    axes[0, 1].set_xlabel("threshold")
+    axes[0, 1].set_ylabel("false positives / sec")
+    axes[0, 1].set_title("False positive rate vs threshold")
+    axes[0, 1].set_yscale("log")
+
+    axes[1, 0].plot(recall, precision, marker=".")
+    axes[1, 0].scatter([recall[best_idx]], [precision[best_idx]], color="k", zorder=5, label="best F1")
+    axes[1, 0].set_xlabel("recall")
+    axes[1, 0].set_ylabel("precision")
+    axes[1, 0].set_title("Precision-Recall curve (held-out test split)")
+    axes[1, 0].legend()
+
+    axes[1, 1].plot(thresholds, f1, color="tab:purple")
+    axes[1, 1].axvline(thresholds[best_idx], color="k", ls="--", lw=1)
+    axes[1, 1].set_xlabel("threshold")
+    axes[1, 1].set_ylabel("F1")
+    axes[1, 1].set_title("F1 vs threshold")
+
+    fig.suptitle(f"Cluster {target_id}: LCMV threshold sweep, "
+                 f"held-out test split ({test_duration_s:.1f}s, {n_target_test} true spikes)")
+    plt.tight_layout()
+    out_png = os.path.join(out_dir, f"threshold_sweep_{target_id}.png")
+    plt.savefig(out_png, dpi=150)
+    plt.close(fig)
+    print(f"Saved plot to {out_png}")
 
 
 def main():
@@ -127,6 +252,14 @@ def main():
         args.template_length, args.template_offset, args.ridge, args.max_spikes, rng)
     print(f"Selected channels: {sel_channels.tolist()}")
 
+    # Recomputed independently of fit_lcmv's internal (already-consumed)
+    # subsample -- just for the diagnostic plot below, so it doesn't need
+    # fit_lcmv to expose its internal waveform. A fresh subsample from the
+    # same spikes/rng is statistically equivalent for visualization purposes.
+    target_wf_sel, _ = gf.mean_waveform(data_train[:, sel], target_spikes_train,
+                                         args.template_length, args.template_offset,
+                                         args.max_spikes, rng)
+
     target_train, target_test = split(spike_t[spike_cl == args.target])
     interferer_test = {cid: split(spike_t[spike_cl == cid])[1] for cid in args.interferers}
     print(f"Target: {len(target_train)} train spikes, {len(target_test)} test spikes")
@@ -168,6 +301,13 @@ def main():
     gf.save_filter(args.out_dir, args.target, sel_channels, f, best_threshold)
     print(f"Saved channels_{args.target}.bin / filter_{args.target}.bin / "
           f"threshold_{args.target}.bin to {args.out_dir}")
+
+    # ---- Diagnostic plots -- always generated on success ------------------
+    plot_threshold_sweep(args.out_dir, args.target, thresholds, recall, precision, f1,
+                          fp_rate_hz, best_idx, test_duration_s, n_target_test)
+    plot_template_and_detections(args.out_dir, args.target, f, sel_channels, target_wf_sel,
+                                  args.template_length, D_test, peak_idx, peak_scores,
+                                  best_threshold, target_test_rel, fs)
 
     return 0
 

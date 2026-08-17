@@ -5,6 +5,7 @@
 
 #include <iostream>
 #include <sstream>
+#include <vector>
 #include <atomic>
 #include <thread>
 #include <chrono>
@@ -41,6 +42,87 @@ BOOL WINAPI consoleCtrlHandler( DWORD ctrlType )
 }
 #endif
 
+// Directory containing ClosedLoop.exe itself (not the process's current
+// working directory, which depends on how/where the user launched it from --
+// e.g. a plain `ClosedLoop.exe C:\...\config.txt` from an arbitrary PowerShell
+// cwd, which is exactly what bit us: a relative calibrationScript path
+// resolved against that cwd instead of the repo, and std::system() silently
+// couldn't find it). Falls back to "." if GetModuleFileName fails for any
+// reason (non-Windows build, or the WinAPI call itself erroring).
+std::string exeDir()
+{
+#ifdef _WIN32
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA( NULL, buf, MAX_PATH );
+    if( n == 0 || n == MAX_PATH )
+        return ".";
+    std::string path( buf, n );
+    size_t slash = path.find_last_of( "\\/" );
+    return (slash == std::string::npos) ? "." : path.substr( 0, slash );
+#else
+    return ".";
+#endif
+}
+
+// Relative paths (config-file entries and defaults alike) are resolved
+// against exeDir(), not the process's cwd -- see exeDir()'s comment. Leaves
+// absolute paths (drive letter or leading slash) untouched.
+std::string resolveRelativeToExe( const std::string &path )
+{
+    if( path.empty() )
+        return path;
+    bool isAbsolute =
+        (path.size() >= 2 && path[1] == ':') ||   // "C:\..." / "C:/..."
+        path[0] == '/' || path[0] == '\\';        // "/..." / "\..."
+    if( isAbsolute )
+        return path;
+    return exeDir() + "\\" + path;
+}
+
+// Runs `commandLine` (a fully-quoted argv-style string, e.g. `"exe" "arg
+// with spaces" --flag value`) and waits for it to exit, returning its exit
+// code (or -1 if it couldn't even be launched).
+//
+// Deliberately NOT std::system(): on Windows, system() runs the command via
+// `cmd.exe /c "<commandLine>"`, wrapping it in one more layer of quoting --
+// and when <commandLine> itself starts with a quoted path *and* contains
+// further quoted arguments (exactly our case: a quoted python.exe path
+// followed by a quoted script path and quoted option values), cmd.exe's
+// quote-stripping heuristic can misparse the result and fail with "The
+// system cannot find the path specified" despite the exact same string
+// running fine when typed directly at a shell. CreateProcess sidesteps
+// cmd.exe entirely and uses Windows' own (more predictable) argv-splitting
+// rules for lpCommandLine, which is also the standard recommended fix for
+// this well-known system() quoting gotcha.
+#ifdef _WIN32
+int runProcessAndWait( const std::string &commandLine )
+{
+    STARTUPINFOA si;
+    ZeroMemory( &si, sizeof(si) );
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi;
+    ZeroMemory( &pi, sizeof(pi) );
+
+    // CreateProcessA requires a writable buffer for lpCommandLine (it may
+    // modify it in place).
+    std::vector<char> buf( commandLine.begin(), commandLine.end() );
+    buf.push_back( '\0' );
+
+    BOOL ok = CreateProcessA(
+        NULL, buf.data(), NULL, NULL, /*bInheritHandles=*/TRUE,
+        0, NULL, NULL, &si, &pi );
+    if( !ok )
+        return -1;
+
+    WaitForSingleObject( pi.hProcess, INFINITE );
+    DWORD exitCode = 1;
+    GetExitCodeProcess( pi.hProcess, &exitCode );
+    CloseHandle( pi.hProcess );
+    CloseHandle( pi.hThread );
+    return static_cast<int>( exitCode );
+}
+#endif
+
 // Shells out to FilterGen/calibrate_for_closedloop.py, which fits the LCMV
 // filter on a training split, sweeps the detection threshold against the
 // held-out remainder's Kilosort ground truth, and writes
@@ -52,8 +134,8 @@ BOOL WINAPI consoleCtrlHandler( DWORD ctrlType )
 void runPythonCalibration( const Config &cfg, int targetId, const std::string &filterDir )
 {
     std::string      pythonExe    = cfg.getString( "pythonExe", "python" );
-    std::string      script       = cfg.getString( "calibrationScript",
-                                         "FilterGen/calibrate_for_closedloop.py" );
+    std::string      script       = resolveRelativeToExe( cfg.getString( "calibrationScript",
+                                         "FilterGen/calibrate_for_closedloop.py" ) );
     std::vector<int> interferers  = cfg.getIntList( "interferers" );
     int              autoInterferers = cfg.getInt( "autoInterferers", 0 );
 
@@ -66,6 +148,14 @@ void runPythonCalibration( const Config &cfg, int targetId, const std::string &f
 
     std::ostringstream cmd;
     cmd << "\"" << pythonExe << "\""
+        // -u: unbuffered stdout/stderr. Without this, Python fully buffers
+        // (not line-buffers) output when it isn't attached to a real
+        // console -- exactly our case here, piped through
+        // CreateProcess/inherited handles -- so progress prints sit
+        // invisible for minutes at a time instead of appearing as they
+        // happen. Same class of bug as main()'s own `std::cout <<
+        // std::unitbuf` fix, just on the Python side of this subprocess call.
+        << " -u"
         << " \"" << script << "\""
         << " --ks-dir \""   << cfg.requireString( "trainingKsDir" )  << "\""
         << " --bin-path \"" << cfg.requireString( "trainingBinPath" ) << "\""
@@ -99,10 +189,14 @@ void runPythonCalibration( const Config &cfg, int targetId, const std::string &f
 
     std::cout << "Running: " << cmd.str() << "\n";
 
+#ifdef _WIN32
+    int rc = runProcessAndWait( cmd.str() );
+#else
     int rc = std::system( cmd.str().c_str() );
+#endif
     if( rc != 0 )
         throw std::runtime_error(
-            "FilterGen/calibrate_for_closedloop.py exited with code " + std::to_string( rc ) );
+            "'" + script + "' exited with code " + std::to_string( rc ) );
 }
 
 } // namespace

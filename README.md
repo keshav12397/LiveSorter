@@ -33,6 +33,18 @@ runs it against a live SpikeGLX session.
      is the single implementation of "fit the filter"/"score a threshold" --
      the same code `FilterGen/generate_filter.py` and
      `FilterGen/threshold_sweep_real.py` use for offline design work.
+     Every successful run also saves two diagnostic PNGs next to the `.bin`
+     files, so there's no separate step to eyeball a calibration:
+     - `template_filter_<id>.png` -- per-channel target mean waveform next
+       to the LCMV filter taps fit to it, plus an example held-out-test-split
+       detection window with the threshold, detected spikes, and Kilosort
+       ground truth all marked, so a channel-selection/filter-shape/threshold
+       problem is visible at a glance instead of only showing up as a
+       recall/precision number.
+     - `threshold_sweep_<id>.png` -- recall/miss-rate, FP-rate, precision-
+       recall, and F1, all vs. threshold, with the chosen best-F1 point
+       marked (same layout `threshold_sweep_real.py`'s standalone sweeps
+       already produce).
    - **`cpp`**: `Calibration.cpp`'s own from-scratch port of the same
      fit+sweep math, kept as a fallback. **Prefer `python`** -- the `cpp`
      path is a second implementation of the same logic that can (and did,
