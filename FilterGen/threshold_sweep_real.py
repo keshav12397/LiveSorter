@@ -13,6 +13,7 @@ call plt.show(), which would block forever in a headless/background run).
 
 import argparse
 import os
+import time
 
 import numpy as np
 from scipy.signal import find_peaks
@@ -65,13 +66,20 @@ def load_and_prepare(args, rng):
     print(f"\nLoaded ({data.nbytes / 1e9:.1f} GB)")
 
     if args.filter:
+        t0 = time.time()
         if args.causal_highpass:
-            print("Using causal RBJ biquad highpass (matches C++ live pipeline exactly)")
+            print("Applying causal RBJ biquad highpass (matches C++ live pipeline exactly)...",
+                  end="", flush=True)
             data = gf.highpass_causal_biquad(data, args.fc, fs)
         else:
+            print("Applying zero-phase highpass...", end="", flush=True)
             data = gf.highpass(data, args.fc, fs)
+        print(f" done ({time.time() - t0:.1f}s)")
     if args.car:
+        t0 = time.time()
+        print("Applying common average reference...", end="", flush=True)
         data = gf.common_average_reference(data)
+        print(f" done ({time.time() - t0:.1f}s)")
 
     return spike_t, spike_cl, data, np_ch, fs
 

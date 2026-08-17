@@ -178,9 +178,17 @@ def memmap_raw(bin_path, n_chan, dtype=np.int16):
 # --------------------------------------------------------------------- #
 
 def common_average_reference(data):
-    """In-place-safe CAR: subtract the per-sample median across channels."""
+    """CAR: subtract the per-sample median across channels, in place.
+
+    np.median still makes one internal copy of `data` to partition (it can't
+    scramble the caller's array since the subtraction below needs the
+    original values), but subtracting in place avoids allocating a second
+    full-size array on top of that -- meaningful on recordings large enough
+    to be RAM-constrained in the first place.
+    """
     ref = np.median(data, axis=1, keepdims=True)
-    return data - ref
+    data -= ref
+    return data
 
 
 def highpass(data, fc, fs, order=2):
