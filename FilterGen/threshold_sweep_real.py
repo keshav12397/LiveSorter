@@ -12,16 +12,25 @@ call plt.show(), which would block forever in a headless/background run).
 """
 
 import argparse
+import atexit
 import os
+import tempfile
 import time
 
 import numpy as np
-from scipy.signal import find_peaks
+from scipy.signal import find_peaks, lfilter
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import generate_filter as gf
+
+# Preprocessed recordings can be tens of GB as float64 -- too big to reliably
+# fit in RAM. load_and_prepare() streams the raw->highpass->CAR pipeline
+# chunk-by-chunk into an np.memmap scratch file here instead of an in-RAM
+# array, so total recording size is bounded by disk space, not RAM. Override
+# by setting args.scratch_dir.
+DEFAULT_SCRATCH_DIR = r"D:\scratch"
 
 
 def load_and_prepare(args, rng):
@@ -50,36 +59,80 @@ def load_and_prepare(args, rng):
     raw = gf.memmap_raw(bin_path, n_saved_chans)
     last_spike = spike_t.max()
     t_max_samples = int(min(raw.shape[0], last_spike + fs))
-    print(f"Loading {t_max_samples} samples x {len(keep_idx)} channels...")
+    n_keep = len(keep_idx)
+    print(f"Loading {t_max_samples} samples x {n_keep} channels...")
 
-    # Copied in chunks (rather than one `raw[:t_max_samples, keep_idx]` fancy
-    # index + astype) so there's a progress readout on large recordings, and
-    # so peak memory is the final float64 array plus one small int16 chunk
-    # instead of a full-size int16 temporary coexisting with the float64 one.
-    data = np.empty((t_max_samples, len(keep_idx)), dtype=np.float64)
+    scratch_dir = getattr(args, "scratch_dir", None) or DEFAULT_SCRATCH_DIR
+    os.makedirs(scratch_dir, exist_ok=True)
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        suffix=".f64", prefix="threshold_sweep_", dir=scratch_dir)
+    os.close(tmp_fd)
+    atexit.register(lambda p=tmp_path: os.path.exists(p) and os.remove(p))
+
+    data = np.memmap(tmp_path, dtype=np.float64, mode="w+",
+                      shape=(t_max_samples, n_keep))
+    print(f"Streaming preprocessed data to scratch file {tmp_path} "
+          f"({data.nbytes / 1e9:.1f} GB on disk, not RAM)")
+
+    # Zero-phase filtfilt needs the whole recording at once (it runs forward
+    # then backward), so it can't be chunked -- fall back to loading the raw
+    # data into the scratch memmap first, then filtering/CAR over it in one
+    # shot, same as before this was streamed. calibrate_for_closedloop.py
+    # never hits this branch: it always passes causal_highpass=True (see its
+    # module docstring), since that's the only highpass the live C++
+    # pipeline can run anyway.
+    if args.filter and not args.causal_highpass:
+        chunk_samples = 2_000_000
+        for start in range(0, t_max_samples, chunk_samples):
+            end = min(start + chunk_samples, t_max_samples)
+            data[start:end] = raw[start:end, keep_idx]
+            pct = 100.0 * end / t_max_samples
+            print(f"\r  {end}/{t_max_samples} samples ({pct:5.1f}%)", end="", flush=True)
+        print(f"\nLoaded ({data.nbytes / 1e9:.1f} GB)")
+
+        t0 = time.time()
+        print("Applying zero-phase highpass...", end="", flush=True)
+        data[:] = gf.highpass(data, args.fc, fs)
+        print(f" done ({time.time() - t0:.1f}s)")
+        if args.car:
+            t0 = time.time()
+            print("Applying common average reference...", end="", flush=True)
+            data[:] = gf.common_average_reference(data)
+            print(f" done ({time.time() - t0:.1f}s)")
+        data.flush()
+        return spike_t, spike_cl, data, np_ch, fs
+
+    # Streamed path: raw load + causal highpass (2-sample filter state
+    # carried across chunks -- exact, see causal_biquad_coeffs()) + CAR
+    # (purely per-sample, no cross-chunk dependency either), each chunk
+    # written straight into the scratch memmap. Peak RAM is a couple of
+    # chunk-sized temporaries, regardless of total recording length.
+    if args.filter:
+        print("Applying causal RBJ biquad highpass (matches C++ live pipeline "
+              "exactly) + CAR while streaming..." if args.car else
+              "Applying causal RBJ biquad highpass (matches C++ live pipeline "
+              "exactly) while streaming...")
+        b, a = gf.causal_biquad_coeffs(args.fc, fs)
+        zi = np.zeros((2, n_keep))
+    elif args.car:
+        print("Applying CAR while streaming...")
+
+    t0 = time.time()
     chunk_samples = 2_000_000
     for start in range(0, t_max_samples, chunk_samples):
         end = min(start + chunk_samples, t_max_samples)
-        data[start:end] = raw[start:end, keep_idx]
+        chunk = raw[start:end, keep_idx].astype(np.float64)
+
+        if args.filter:
+            chunk, zi = lfilter(b, a, chunk, axis=0, zi=zi)
+        if args.car:
+            chunk = gf.common_average_reference(chunk)
+
+        data[start:end] = chunk
         pct = 100.0 * end / t_max_samples
         print(f"\r  {end}/{t_max_samples} samples ({pct:5.1f}%)", end="", flush=True)
-    print(f"\nLoaded ({data.nbytes / 1e9:.1f} GB)")
-
-    if args.filter:
-        t0 = time.time()
-        if args.causal_highpass:
-            print("Applying causal RBJ biquad highpass (matches C++ live pipeline exactly)...",
-                  end="", flush=True)
-            data = gf.highpass_causal_biquad(data, args.fc, fs)
-        else:
-            print("Applying zero-phase highpass...", end="", flush=True)
-            data = gf.highpass(data, args.fc, fs)
-        print(f" done ({time.time() - t0:.1f}s)")
-    if args.car:
-        t0 = time.time()
-        print("Applying common average reference...", end="", flush=True)
-        data = gf.common_average_reference(data)
-        print(f" done ({time.time() - t0:.1f}s)")
+    data.flush()
+    print(f"\nDone ({data.nbytes / 1e9:.1f} GB on disk, {time.time() - t0:.1f}s)")
 
     return spike_t, spike_cl, data, np_ch, fs
 
@@ -207,6 +260,9 @@ def main():
     ap.add_argument("--n-thresholds", type=int, default=60)
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--scratch-dir", default=DEFAULT_SCRATCH_DIR,
+                     help="Directory for the streamed preprocessing scratch "
+                          f"file (default: {DEFAULT_SCRATCH_DIR})")
     args = ap.parse_args()
 
     rng = np.random.default_rng(args.seed)

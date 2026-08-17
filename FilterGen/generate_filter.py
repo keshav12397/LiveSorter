@@ -197,22 +197,15 @@ def highpass(data, fc, fs, order=2):
     return filtfilt(b, a, data, axis=0)
 
 
-def highpass_causal_biquad(data, fc, fs):
-    """Causal high-pass, coefficient-for-coefficient identical to
-    ClosedLoop/ButterworthHighpass.h (RBJ Audio-EQ-Cookbook 2nd-order
-    Butterworth biquad, Q=1/sqrt(2)).
-
-    Use this (via --causal-highpass) instead of `highpass()`'s zero-phase
-    filtfilt when the filter/threshold will be deployed against the C++
-    live pipeline, which can only filter causally. `filtfilt` and this
-    causal biquad have the same magnitude response shape but different
-    phase -- calibrating against filtfilt-preprocessed data while running
-    causal-biquad-preprocessed data live silently degrades the matched
-    filter's correlation with real spike waveforms (found the hard way:
-    C++ live recall capped around 45-63% vs. this function's ~97% when the
-    mismatch was still present). Training the filter on the exact same
-    causal filter closes that gap by construction, instead of trying to
-    make the live filter impossibly match filtfilt's zero-phase response.
+def causal_biquad_coeffs(fc, fs):
+    """(b, a) for the RBJ Audio-EQ-Cookbook 2nd-order Butterworth highpass
+    biquad, coefficient-for-coefficient identical to
+    ClosedLoop/ButterworthHighpass.h (Q=1/sqrt(2)). Split out from
+    highpass_causal_biquad() so a chunked/streaming caller can drive
+    scipy.signal.lfilter itself, carrying the 2-sample filter state (zi/zf)
+    across chunk boundaries -- that reproduces filtering the whole array in
+    one lfilter() call exactly (no overlap padding needed: an IIR filter's
+    only cross-chunk dependency is that small state vector).
     """
     Q = 1.0 / np.sqrt(2.0)
     w0 = 2.0 * np.pi * fc / fs
@@ -227,6 +220,25 @@ def highpass_causal_biquad(data, fc, fs):
     a2 = (1.0 - alpha) / a0
     b = np.array([b0, b1, b2])
     a = np.array([1.0, a1, a2])
+    return b, a
+
+
+def highpass_causal_biquad(data, fc, fs):
+    """Causal high-pass -- see causal_biquad_coeffs() for the coefficients.
+
+    Use this (via --causal-highpass) instead of `highpass()`'s zero-phase
+    filtfilt when the filter/threshold will be deployed against the C++
+    live pipeline, which can only filter causally. `filtfilt` and this
+    causal biquad have the same magnitude response shape but different
+    phase -- calibrating against filtfilt-preprocessed data while running
+    causal-biquad-preprocessed data live silently degrades the matched
+    filter's correlation with real spike waveforms (found the hard way:
+    C++ live recall capped around 45-63% vs. this function's ~97% when the
+    mismatch was still present). Training the filter on the exact same
+    causal filter closes that gap by construction, instead of trying to
+    make the live filter impossibly match filtfilt's zero-phase response.
+    """
+    b, a = causal_biquad_coeffs(fc, fs)
     # lfilter (not filtfilt) -- causal, zero initial state, exactly matching
     # ButterworthHighpass::processSample's per-sample recursion starting
     # from x1_=x2_=y1_=y2_=0.
