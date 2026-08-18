@@ -101,6 +101,38 @@ GpuFilterBank GpuFilterBank::load( const std::string &dir, int nChannelsPerUnit,
 }
 
 
+GpuFilterBank GpuFilterBank::fromHostArrays( const std::vector<int> &unitIds,
+                                              const std::vector<int32_t> &channels,
+                                              const std::vector<float> &filters,
+                                              const std::vector<float> &thresholds,
+                                              int nChannelsPerUnit, int templateLength )
+{
+    GpuFilterBank fb;
+    fb.nUnits = static_cast<int>( unitIds.size() );
+    fb.nChannelsPerUnit = nChannelsPerUnit;
+    fb.templateLength = templateLength;
+    fb.hostUnitIds = unitIds;
+
+    if( channels.size() != static_cast<size_t>( fb.nUnits ) * nChannelsPerUnit ||
+        filters.size() != static_cast<size_t>( fb.nUnits ) * templateLength * nChannelsPerUnit ||
+        thresholds.size() != static_cast<size_t>( fb.nUnits ) )
+        throw std::runtime_error( "GpuFilterBank::fromHostArrays: array size mismatch" );
+
+    CUDA_CHECK( cudaMalloc( &fb.d_channels, channels.size() * sizeof(int32_t) ) );
+    CUDA_CHECK( cudaMalloc( &fb.d_filters, filters.size() * sizeof(float) ) );
+    CUDA_CHECK( cudaMalloc( &fb.d_thresholds, thresholds.size() * sizeof(float) ) );
+
+    CUDA_CHECK( cudaMemcpy( fb.d_channels, channels.data(),
+                             channels.size() * sizeof(int32_t), cudaMemcpyHostToDevice ) );
+    CUDA_CHECK( cudaMemcpy( fb.d_filters, filters.data(),
+                             filters.size() * sizeof(float), cudaMemcpyHostToDevice ) );
+    CUDA_CHECK( cudaMemcpy( fb.d_thresholds, thresholds.data(),
+                             thresholds.size() * sizeof(float), cudaMemcpyHostToDevice ) );
+
+    return fb;
+}
+
+
 void GpuFilterBank::release()
 {
     if( d_channels )   { cudaFree( d_channels );   d_channels   = nullptr; }

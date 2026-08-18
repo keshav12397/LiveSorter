@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <cstdint>
 
 // Device-resident multi-unit filter bank, loaded once at startup from the
 // flat packed files FilterGen/calibrate_all_units.py writes:
@@ -46,6 +47,25 @@ struct GpuFilterBank {
     // std::runtime_error if any file is missing or its size is inconsistent
     // with the given dimensions.
     static GpuFilterBank load( const std::string &dir, int nChannelsPerUnit, int templateLength );
+
+    // Builds a GpuFilterBank directly from in-memory host arrays instead of
+    // reading the packed files -- for the batch calibration path (see
+    // NoiseCovariance.h / the branch plan's Phase 4), where the filter bank
+    // is being CONSTRUCTED, not loaded from a previous run's output.
+    // channels: int[nUnits * nChannelsPerUnit], already translated to
+    // indices within the CAR/preprocessed channel group (same convention
+    // ImecFetchThreadGPU::setup() produces for the live path -- caller's
+    // responsibility here, this does no translation). thresholds: pass all
+    // -infinity to make every windowed-NMS-accepted peak get reported
+    // unconditionally (GpuConvolutionEngine's existing nmsThresholdKernel
+    // reused completely unmodified -- see NoiseCovariance.h's sibling
+    // offline scoring driver for why this is preferred over a second kernel
+    // variant).
+    static GpuFilterBank fromHostArrays( const std::vector<int> &unitIds,
+                                          const std::vector<int32_t> &channels,
+                                          const std::vector<float> &filters,
+                                          const std::vector<float> &thresholds,
+                                          int nChannelsPerUnit, int templateLength );
 
     // cudaFree everything. Safe to call more than once (idempotent) --
     // matters because both an explicit release() and the destructor may
