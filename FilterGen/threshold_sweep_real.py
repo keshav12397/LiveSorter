@@ -72,19 +72,27 @@ def load_and_prepare(args, rng, dtype=np.float64, order="C"):
     # order='F' (Fortran/column-major) stores each channel's samples
     # contiguously on disk instead of interleaving all channels per sample.
     # Doesn't change data.shape or any indexing semantics (data[:, sel]
-    # means the same thing either way) -- but it changes what "data[:, sel]"
-    # actually has to read off disk: in the default 'C' order, extracting a
-    # handful of channels still has to touch every OTHER channel's bytes for
-    # every sample (interleaved storage), while 'F' order only reads the
-    # selected channels' own bytes. Callers that gather ONE channel subset
-    # once (calibrate_for_closedloop.py) don't need this -- 'C' is fine.
-    # Callers that gather a DIFFERENT small channel subset per unit, many
-    # times over a large shared recording (calibrate_all_units.py), do:
-    # measured 12.5x faster per-gather on a 7.7GB test file with this
-    # change (see FilterGen/test_forder_gather_equivalence.py), at the cost
-    # of a ~1.5x slower one-time streaming build (writing becomes similarly
-    # scattered instead of the reads) -- a clear net win when the same file
-    # gets gathered from dozens to hundreds of times.
+    # means the same thing either way). In isolation this makes a channel
+    # gather much cheaper (measured 12-14x faster reading a handful of
+    # channels back out of an already-built file -- see
+    # FilterGen/test_forder_gather_equivalence.py): 'C' order has to touch
+    # every OTHER channel's bytes for every sample just to extract a few
+    # columns, 'F' order only reads the selected channels' own bytes.
+    #
+    # CAVEAT (found the hard way -- see the all_units branch commit
+    # history): that speedup is for a file that's already built. THIS
+    # function builds it incrementally, one ~2M-sample chunk at a time
+    # (required by the causal filter's cross-chunk state) -- writing each
+    # chunk into an 'F'-order file scatters it across every channel's own
+    # (far-apart) region instead of one contiguous block, and that scattered
+    # incremental-write pattern was measured far slower in practice than a
+    # single bulk write, badly enough to make 'F' a net loss for a caller
+    # that also has to build the file (not just read an existing one).
+    # calibrate_all_units.py deliberately does NOT pass order='F' for this
+    # reason, despite being exactly the kind of many-small-gathers caller
+    # this option was built for -- see its own comment at the call site.
+    # 'F' remains available/correct for a future caller that can build the
+    # file some other way (or accept an all-at-once, non-chunked write).
     data = np.memmap(tmp_path, dtype=dtype, mode="w+",
                       shape=(t_max_samples, n_keep), order=order)
     print(f"Streaming preprocessed data to scratch file {tmp_path} "

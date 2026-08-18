@@ -116,14 +116,26 @@ def main():
     load_args.causal_highpass = True
 
     print("Loading + preprocessing (float32, shared across all units)...")
-    # order='F': every unit below gathers its OWN small channel subset out
-    # of this same recording -- see load_and_prepare's comment for why that
-    # access pattern needs column-major (not row-major/default) storage to
-    # avoid touching every other channel's bytes on every gather (measured
-    # 12.5x faster per-gather; single-target calibrate_for_closedloop.py
-    # doesn't use this since it only ever gathers once).
+    # NOT using order='F' here despite each unit gathering a different small
+    # channel subset (which is exactly what 'F' speeds up -- see
+    # load_and_prepare's docstring): measured great gather speedups (12-14x)
+    # in isolation, but real-world use surfaced a worse, RAM-independence-
+    # breaking problem on the WRITE side. This function builds the array
+    # incrementally (~2M-sample chunks, required by the causal filter's
+    # cross-chunk state), and writing each chunk into an 'F'-order memmap
+    # scatters it across 96 far-apart file offsets (one per channel) instead
+    # of one contiguous block -- 20+ scattered chunk writes turned out far
+    # slower in practice than the bulk single-assignment write my benchmark
+    # tested. The "obvious" fix (build the chunked result in a RAM buffer,
+    # then do one fast bulk write to an 'F'-order file at the end) was
+    # rejected: it requires holding the whole recording in RAM regardless of
+    # scratch-file order, which doesn't generalize to smaller machines --
+    # see the all_units branch commit history for the fuller story. Left as
+    # default 'C' order; the per-unit gather cost is real but the
+    # noise_covariance_vectorized fix (see generate_filter.py) is the
+    # verified, RAM-size-independent win that's actually in effect here.
     spike_t, spike_cl, data, np_ch, fs = tsr.load_and_prepare(
-        load_args, rng, dtype=np.float32, order="F")
+        load_args, rng, dtype=np.float32)
 
     _, _, labels = gf.load_kilosort(args.ks_dir)
     positions = gf.load_channel_positions_json(args.channel_map_json) \
