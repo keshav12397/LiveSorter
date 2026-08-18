@@ -186,6 +186,18 @@ def main():
     ap.add_argument("--tol", type=int, default=100,
                      help="Match tolerance in samples (default matches the "
                           "reference script)")
+    ap.add_argument("--wrap-samples", type=int, default=0,
+                     help="The recording's true total sample count (e.g. "
+                          "fileSizeBytes / (2 * nSavedChans) from its .meta). "
+                          "A live/simulated SpikeGLX session's sample counter "
+                          "keeps incrementing across every loop through the "
+                          "replayed file rather than resetting to 0 -- pass "
+                          "this so detections' sample_index (which can already "
+                          "be several loops in) gets reduced mod this value "
+                          "before comparing against Kilosort's ground truth, "
+                          "which is indexed for a single pass of the file. "
+                          "0 (default) = no wrapping, for a genuinely "
+                          "single-pass live/offline run.")
     ap.add_argument("--out-dir", required=True)
     args = ap.parse_args()
 
@@ -198,6 +210,12 @@ def main():
     det_df = pd.read_csv(args.detections_csv)
     if det_df.empty:
         sys.exit("Detections CSV is empty -- nothing to validate.")
+
+    if args.wrap_samples:
+        before = det_df["sample_index"].copy()
+        det_df["sample_index"] = det_df["sample_index"] % args.wrap_samples
+        print(f"Wrapped sample_index mod {args.wrap_samples} "
+              f"(raw range was [{before.min()}, {before.max()}])")
 
     # Shared active window: the run only ever fetched/detected within the
     # sample-index range it actually saw. Ground-truth spikes outside that
