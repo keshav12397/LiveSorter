@@ -56,13 +56,158 @@ Example
 
 import argparse
 import csv
+import io
 import os
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 
 import generate_filter as gf
 import threshold_sweep_real as tsr
+
+# Per-unit work (channel-subset gather from the shared preprocessed recording,
+# full-length matched-filter convolution, peak-finding, threshold sweep) only
+# ever touches that one unit's own small channel slice and reads from a
+# scratch file that's already fully built by the time any unit fitting
+# starts -- so units are embarrassingly parallel across a process pool.
+# Pinning each worker's BLAS thread count to 1 matters here: numpy's BLAS
+# calls otherwise each try to fan out across all cores on their own, and
+# N worker processes doing that simultaneously massively oversubscribes a
+# 6-core/12-thread machine, which would make the pool *slower* than serial.
+# This has to be set before numpy/BLAS initializes in each child process --
+# spawned children re-run `import numpy` fresh, and they inherit the parent's
+# environment at spawn time, so setting this in the parent before the pool is
+# created (not inside the worker function, which runs after numpy is already
+# loaded) is what actually makes it take effect.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
+_worker = {}
+
+
+def _init_worker(tmp_path, dtype, shape, order, np_ch, positions, labels,
+                  spike_t, spike_cl, split_t, unit_args):
+    # Each worker opens its own read-only memmap onto the SAME scratch file
+    # the main process already streamed the preprocessed recording into --
+    # no copying, no re-preprocessing, just independent read handles onto
+    # one shared on-disk array.
+    _worker["data"] = np.memmap(tmp_path, dtype=dtype, mode="r", shape=shape, order=order)
+    _worker["np_ch"] = np_ch
+    _worker["positions"] = positions
+    _worker["labels"] = labels
+    _worker["spike_t"] = spike_t
+    _worker["spike_cl"] = spike_cl
+    _worker["split_t"] = split_t
+    _worker["args"] = unit_args
+
+
+def _fit_one_unit(target_id, spike_count):
+    """Runs in a worker process. Same fit+sweep body calibrate_all_units.py
+    always ran, just relocated so a process pool can call it per unit --
+    no algorithm changes."""
+    data = _worker["data"]
+    np_ch = _worker["np_ch"]
+    positions = _worker["positions"]
+    labels = _worker["labels"]
+    spike_t = _worker["spike_t"]
+    spike_cl = _worker["spike_cl"]
+    split_t = _worker["split_t"]
+    a = _worker["args"]
+
+    data_train, data_test = data[:split_t], data[split_t:]
+
+    def split(times):
+        return times[times < split_t], times[times >= split_t]
+
+    spike_t_train = spike_t[spike_t < split_t]
+    spike_cl_train = spike_cl[spike_t < split_t]
+
+    buf = io.StringIO()
+    row = {"unit_id": target_id, "n_channels": "", "sel_channels": "",
+           "threshold": "", "recall": "", "precision": "", "f1": "",
+           "fp_rate_hz": "", "n_train_spikes": "", "n_test_spikes": "",
+           "status": "failed"}
+    packed = None
+    # One RNG per unit (seeded off unit id, not shared across units the way
+    # the old serial version's single advancing rng was) -- makes each
+    # unit's result independent of what order the pool happens to complete
+    # units in, which the old sequential-rng-state version implicitly
+    # depended on. Reused across both calls below (not re-seeded per call)
+    # to match the original single-stream behavior within a unit.
+    unit_rng = np.random.default_rng(a["seed"] + target_id)
+    try:
+        interferer_ids = gf.auto_pick_interferers_spatial(
+            data, spike_t, spike_cl, np_ch, target_id, labels,
+            a["auto_interferers"], a["template_length"], a["template_offset"],
+            channel_positions=positions, rng=unit_rng)
+        if not interferer_ids:
+            raise ValueError("no interferers found nearby")
+
+        f, sel, sel_channels, _, _ = tsr.fit_lcmv(
+            data_train, spike_t_train, spike_cl_train, np_ch,
+            target_id, interferer_ids, a["n_channels"],
+            a["template_length"], a["template_offset"],
+            a["ridge"], a["max_spikes"], unit_rng)
+
+        if len(sel_channels) != a["n_channels"]:
+            raise ValueError(f"only {len(sel_channels)} channels available, "
+                              f"need {a['n_channels']}")
+
+        f = np.asarray(f, dtype=np.float32)
+
+        target_train, target_test = split(spike_t[spike_cl == target_id])
+        interferer_test = {cid: split(spike_t[spike_cl == cid])[1]
+                            for cid in interferer_ids}
+        if len(target_test) == 0:
+            raise ValueError("no held-out test spikes")
+
+        data_test_sel = data_test[:, sel]
+        D_test = gf.filter_output(data_test_sel, f)
+        window = a["template_length"] // 4
+        min_sep = a["template_length"] // 2
+        peak_idx, peak_scores = tsr.find_all_peaks(D_test, min_sep)
+
+        target_test_rel = target_test - split_t
+        interferer_test_rel = {cid: t - split_t for cid, t in interferer_test.items()}
+        results = tsr.sweep_thresholds(peak_idx, peak_scores, target_test_rel,
+                                        interferer_test_rel, window, a["n_thresholds"])
+
+        thresholds = np.array([r["threshold"] for r in results])
+        hits = np.array([r["hits"] for r in results])
+        total_fp = np.array([r["total_fp"] for r in results])
+        n_target_test = max(len(target_test), 1)
+        test_duration_s = (data.shape[0] - split_t) / a["fs"]
+
+        recall = hits / n_target_test
+        precision = hits / np.maximum(hits + total_fp, 1)
+        f1 = 2 * precision * recall / np.maximum(precision + recall, 1e-9)
+        fp_rate_hz = total_fp / test_duration_s
+
+        best_idx = int(np.argmax(f1))
+        best_threshold = float(thresholds[best_idx])
+
+        packed = (np.asarray(sel_channels, dtype=np.int32), f, np.float32(best_threshold))
+
+        row.update({
+            "n_channels": len(sel_channels),
+            "sel_channels": " ".join(str(c) for c in sel_channels),
+            "threshold": best_threshold,
+            "recall": recall[best_idx], "precision": precision[best_idx],
+            "f1": f1[best_idx], "fp_rate_hz": fp_rate_hz[best_idx],
+            "n_train_spikes": len(target_train), "n_test_spikes": len(target_test),
+            "status": "ok",
+        })
+        print(f"unit {target_id} ({spike_count} spikes): "
+              f"threshold={best_threshold:.4f}  recall={recall[best_idx]:.2%}  "
+              f"precision={precision[best_idx]:.2%}  f1={f1[best_idx]:.3f}", file=buf)
+
+    except Exception as e:
+        row["status"] = f"failed: {e}"
+        print(f"unit {target_id} ({spike_count} spikes): SKIPPED: {e}", file=buf)
+
+    return target_id, row, packed, buf.getvalue()
 
 
 def main():
@@ -96,6 +241,14 @@ def main():
                           "spike count first), for a bounded/reproducible "
                           "partial-probe run. 0 (default) = no cap, all "
                           "qualifying units.")
+    ap.add_argument("--workers", type=int, default=0,
+                     help="Number of unit-fitting worker processes to run in "
+                          "parallel (each unit's fit+sweep only touches its "
+                          "own small channel slice of the shared preprocessed "
+                          "recording, so units are independent). 0 (default) "
+                          "= os.cpu_count(). Pass 1 to force the old serial "
+                          "behavior (e.g. for debugging a single unit's "
+                          "traceback without pool noise).")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -144,13 +297,6 @@ def main():
     split_t = int(args.train_frac * data.shape[0])
     print(f"Train: [0, {split_t}) ({split_t/fs:.1f}s)   "
           f"Test: [{split_t}, {data.shape[0]}) ({(data.shape[0]-split_t)/fs:.1f}s)")
-    data_train, data_test = data[:split_t], data[split_t:]
-
-    def split(times):
-        return times[times < split_t], times[times >= split_t]
-
-    spike_t_train = spike_t[spike_t < split_t]
-    spike_cl_train = spike_cl[spike_t < split_t]
 
     unit_ids, counts = np.unique(spike_cl, return_counts=True)
     order = np.argsort(counts)[::-1]  # highest spike count first, for --max-units to pick a stable/reproducible set
@@ -168,95 +314,57 @@ def main():
           f"excluding noise-labeled and <{args.min_spikes}-spike clusters"
           + (f", capped to top {args.max_units} by spike count)" if args.max_units else ")"))
 
-    window = args.template_length // 4
-    min_sep = args.template_length // 2
+    n_workers = args.workers if args.workers > 0 else (os.cpu_count() or 1)
+    print(f"Fitting {len(candidates)} units across {n_workers} worker process(es)...")
+
+    # Drop the main process's read-write handle onto the scratch file before
+    # workers each open their own read-only handle onto it. load_and_prepare
+    # already flushed all writes; nothing further is written to this file --
+    # but per the same Windows sharing-mode caution documented in
+    # test_forder_gather_equivalence.py, an open memmap handle needs to be
+    # explicitly released (del + gc) before other opens onto the same file
+    # are guaranteed to behave, rather than assuming a lingering w+ handle is
+    # harmless to read past.
+    data_path, data_dtype, data_shape = data.filename, data.dtype, data.shape
+    del data
+    import gc
+    gc.collect()
+    data = np.memmap(data_path, dtype=data_dtype, mode="r", shape=data_shape, order="C")
+
+    unit_args = dict(auto_interferers=args.auto_interferers,
+                      template_length=args.template_length,
+                      template_offset=args.template_offset,
+                      n_channels=args.n_channels, ridge=args.ridge,
+                      max_spikes=args.max_spikes, n_thresholds=args.n_thresholds,
+                      fs=fs, seed=args.seed)
+    # np.memmap.filename recovers the scratch file load_and_prepare streamed
+    # into -- no need to plumb the path out of that function separately.
+    # calibrate_all_units.py never requests order='F' from it (see the
+    # load call above), so 'C' is always the layout here.
+    init_args = (data.filename, data.dtype, data.shape, "C", np_ch, positions,
+                 labels, spike_t, spike_cl, split_t, unit_args)
+
+    results_by_id = {}
+    with ProcessPoolExecutor(max_workers=n_workers, initializer=_init_worker,
+                              initargs=init_args) as pool:
+        futures = {pool.submit(_fit_one_unit, uid, int(counts[unit_ids == uid][0])): uid
+                   for uid in candidates}
+        for i, fut in enumerate(as_completed(futures)):
+            target_id, row, packed, log_text = fut.result()
+            results_by_id[target_id] = (row, packed)
+            print(f"[{i+1}/{len(candidates)}] {log_text}", end="")
 
     packed_ids, packed_channels, packed_filters, packed_thresholds = [], [], [], []
     summary_rows = []
-
-    for i, target_id in enumerate(candidates):
-        print(f"\n[{i+1}/{len(candidates)}] unit {target_id} "
-              f"({counts[unit_ids == target_id][0]} spikes)...")
-        row = {"unit_id": target_id, "n_channels": "", "sel_channels": "",
-               "threshold": "", "recall": "", "precision": "", "f1": "",
-               "fp_rate_hz": "", "n_train_spikes": "", "n_test_spikes": "",
-               "status": "failed"}
-        try:
-            interferer_ids = gf.auto_pick_interferers_spatial(
-                data, spike_t, spike_cl, np_ch, target_id, labels,
-                args.auto_interferers, args.template_length, args.template_offset,
-                channel_positions=positions, rng=rng)
-            if not interferer_ids:
-                raise ValueError("no interferers found nearby")
-
-            f, sel, sel_channels, _, _ = tsr.fit_lcmv(
-                data_train, spike_t_train, spike_cl_train, np_ch,
-                target_id, interferer_ids, args.n_channels,
-                args.template_length, args.template_offset,
-                args.ridge, args.max_spikes, rng)
-
-            if len(sel_channels) != args.n_channels:
-                # Can happen for a unit near the edge of a small channel
-                # group where fewer than n_channels are even available.
-                # Caught here (not left to crash np.stack() at the very end
-                # of the whole batch, after every other unit already fit).
-                raise ValueError(f"only {len(sel_channels)} channels available, "
-                                  f"need {args.n_channels}")
-
-            # Deployed artifact + scoring precision -- see module docstring.
-            f = np.asarray(f, dtype=np.float32)
-
-            target_train, target_test = split(spike_t[spike_cl == target_id])
-            interferer_test = {cid: split(spike_t[spike_cl == cid])[1]
-                                for cid in interferer_ids}
-            if len(target_test) == 0:
-                raise ValueError("no held-out test spikes")
-
-            data_test_sel = data_test[:, sel]
-            D_test = gf.filter_output(data_test_sel, f)
-            peak_idx, peak_scores = tsr.find_all_peaks(D_test, min_sep)
-
-            target_test_rel = target_test - split_t
-            interferer_test_rel = {cid: t - split_t for cid, t in interferer_test.items()}
-            results = tsr.sweep_thresholds(peak_idx, peak_scores, target_test_rel,
-                                            interferer_test_rel, window, args.n_thresholds)
-
-            thresholds = np.array([r["threshold"] for r in results])
-            hits = np.array([r["hits"] for r in results])
-            total_fp = np.array([r["total_fp"] for r in results])
-            n_target_test = max(len(target_test), 1)
-            test_duration_s = (data.shape[0] - split_t) / fs
-
-            recall = hits / n_target_test
-            precision = hits / np.maximum(hits + total_fp, 1)
-            f1 = 2 * precision * recall / np.maximum(precision + recall, 1e-9)
-            fp_rate_hz = total_fp / test_duration_s
-
-            best_idx = int(np.argmax(f1))
-            best_threshold = float(thresholds[best_idx])
-
-            packed_ids.append(target_id)
-            packed_channels.append(np.asarray(sel_channels, dtype=np.int32))
-            packed_filters.append(f)  # (template_length, n_channels), float32
-            packed_thresholds.append(np.float32(best_threshold))
-
-            row.update({
-                "n_channels": len(sel_channels),
-                "sel_channels": " ".join(str(c) for c in sel_channels),
-                "threshold": best_threshold,
-                "recall": recall[best_idx], "precision": precision[best_idx],
-                "f1": f1[best_idx], "fp_rate_hz": fp_rate_hz[best_idx],
-                "n_train_spikes": len(target_train), "n_test_spikes": len(target_test),
-                "status": "ok",
-            })
-            print(f"  threshold={best_threshold:.4f}  recall={recall[best_idx]:.2%}  "
-                  f"precision={precision[best_idx]:.2%}  f1={f1[best_idx]:.3f}")
-
-        except Exception as e:
-            row["status"] = f"failed: {e}"
-            print(f"  SKIPPED: {e}", file=sys.stderr)
-
+    for target_id in candidates:
+        row, packed = results_by_id[target_id]
         summary_rows.append(row)
+        if packed is not None:
+            sel_channels, f, best_threshold = packed
+            packed_ids.append(target_id)
+            packed_channels.append(sel_channels)
+            packed_filters.append(f)  # (template_length, n_channels), float32
+            packed_thresholds.append(best_threshold)
 
     n_ok = len(packed_ids)
     print(f"\n{n_ok}/{len(candidates)} units fit successfully.")
