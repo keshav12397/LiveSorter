@@ -33,7 +33,7 @@ import generate_filter as gf
 DEFAULT_SCRATCH_DIR = r"D:\scratch"
 
 
-def load_and_prepare(args, rng):
+def load_and_prepare(args, rng, dtype=np.float64):
     spike_t, spike_cl, labels = gf.load_kilosort(args.ks_dir)
     params = gf.load_params_py(args.ks_dir)
 
@@ -69,7 +69,7 @@ def load_and_prepare(args, rng):
     os.close(tmp_fd)
     atexit.register(lambda p=tmp_path: os.path.exists(p) and os.remove(p))
 
-    data = np.memmap(tmp_path, dtype=np.float64, mode="w+",
+    data = np.memmap(tmp_path, dtype=dtype, mode="w+",
                       shape=(t_max_samples, n_keep))
     print(f"Streaming preprocessed data to scratch file {tmp_path} "
           f"({data.nbytes / 1e9:.1f} GB on disk, not RAM)")
@@ -121,7 +121,7 @@ def load_and_prepare(args, rng):
     chunk_samples = 2_000_000
     for start in range(0, t_max_samples, chunk_samples):
         end = min(start + chunk_samples, t_max_samples)
-        chunk = raw[start:end, keep_idx].astype(np.float64)
+        chunk = raw[start:end, keep_idx].astype(dtype)
 
         if args.filter:
             chunk, zi = lfilter(b, a, chunk, axis=0, zi=zi)

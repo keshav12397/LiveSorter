@@ -9,6 +9,10 @@
 struct SpikeEvent {
     double     timeRelSyncS;  // seconds since the IMEC stream's most recent SY sync edge
     long long  sampleIndex;   // absolute IMEC stream sample index (for spikeTimes.txt)
+    int        unitId;        // Kilosort cluster id. -1 for the single-target pipeline
+                               // (ImecFetchThread/DecisionThread never read this field);
+                               // a real cluster id when produced by the all-units GPU
+                               // pipeline (ImecFetchThreadGPU) -- see GpuFilterBank::hostUnitIds.
 };
 
 struct SyllableEvent {

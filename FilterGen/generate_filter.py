@@ -493,7 +493,12 @@ def filter_output(data_sel, f):
     per-channel correlation trace D(t). Matches the convention used by the
     original MATLAB script: conv(data, fliplr(filter), 'same') per channel,
     summed across channels."""
-    D = np.zeros(data_sel.shape[0])
+    # dtype follows the input (not hardcoded float64) so that scoring done in
+    # float32 (e.g. calibrate_all_units.py, to match the online float32 GPU
+    # kernel's precision) actually produces float32 D-values -- otherwise a
+    # threshold picked against silently-upcast float64 scores would be
+    # calibrated for a distribution the GPU path never actually produces.
+    D = np.zeros(data_sel.shape[0], dtype=data_sel.dtype)
     for ch in range(data_sel.shape[1]):
         D += np.convolve(data_sel[:, ch], f[::-1, ch], mode="same")
     return D

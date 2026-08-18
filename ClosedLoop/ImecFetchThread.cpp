@@ -179,6 +179,7 @@ void ImecFetchThread::fetchLoop()
                 SpikeEvent ev;
                 ev.sampleIndex  = peaks[p].sampleIndex;
                 ev.timeRelSyncS = syncTracker.secondsSinceLastEdge( peaks[p].sampleIndex );
+                ev.unitId       = -1; // single-target pipeline -- see Events.h
                 spikeQueue_.push( ev );
             }
             // else: no sync edge seen yet this session -- still logged to

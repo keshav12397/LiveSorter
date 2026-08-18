@@ -77,6 +77,42 @@
             ]
         },
         {
+            "label": "build closed loop gpu",
+            "type": "shell",
+            "command": "nvcc",
+            "args": [
+                "-ccbin", "cl.exe",
+                "-std=c++17",
+                "-gencode=arch=compute_80,code=compute_80",
+                "-o", "ClosedLoopAllUnits.exe",
+                "ClosedLoop/mainAllUnits.cpp",
+                "ClosedLoop/Config.cpp",
+                "ClosedLoop/SglxMetaReader.cpp",
+                "ClosedLoop/GpuFilterBank.cu",
+                "ClosedLoop/GpuPreprocessor.cu",
+                "ClosedLoop/GpuConvolutionEngine.cu",
+                "ClosedLoop/ImecFetchThreadGPU.cu",
+                "SDK/API/SglxCppClient.cpp",
+                "-I", "SDK/API",
+                "-I", "ClosedLoop",
+                "-Xlinker", "/LIBPATH:SDK/API",
+                "-Xlinker", "libSglxApi.a"
+            ],
+            "options": {
+                "env": {
+                    "PATH": "C:\\Program Files (x86)\\Microsoft Visual Studio\\2017\\Community\\VC\\Tools\\MSVC\\14.16.27023\\bin\\Hostx64\\x64;${env:PATH}",
+                    "LIB": "C:\\Program Files (x86)\\Microsoft Visual Studio\\2017\\Community\\VC\\Tools\\MSVC\\14.16.27023\\ATLMFC\\lib\\x64;C:\\Program Files (x86)\\Microsoft Visual Studio\\2017\\Community\\VC\\Tools\\MSVC\\14.16.27023\\lib\\x64;C:\\Program Files (x86)\\Windows Kits\\10\\lib\\10.0.19041.0\\ucrt\\x64;C:\\Program Files (x86)\\Windows Kits\\10\\lib\\10.0.19041.0\\um\\x64"
+                }
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "problemMatcher": [
+                "$msCompile"
+            ]
+        },
+        {
             "type": "cppbuild",
             "label": "C/C++: cl.exe build active file",
             "command": "cl.exe",

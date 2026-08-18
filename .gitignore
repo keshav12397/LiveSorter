@@ -2,6 +2,8 @@
 *.obj
 *.pdb
 *.ilk
+*.exp
+*.lib
 *.bin
 *.pyc
 *.tsv
