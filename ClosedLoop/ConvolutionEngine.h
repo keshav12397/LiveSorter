@@ -3,6 +3,7 @@
 
 #include <vector>
 #include <deque>
+#include <utility>
 #include <cstdint>
 
 // One detected local maximum of the matched-filter output.
@@ -62,13 +63,35 @@ public:
     std::vector<PeakEvent> processChunk( const double *data, size_t nSamples,
                                           long long streamSampleOffset );
 
+    // Forces a final decision round over whatever is currently buffered,
+    // treating the buffer's end as if no more data will ever arrive --
+    // call this ONCE at the true end of a finite stream (e.g. Calibration's
+    // training-file replay, or any other offline/batch use) to get the
+    // last ~finalizeMarginSamples_ worth of candidates that processChunk()
+    // alone would otherwise hold back forever waiting for future context
+    // that will never come. Never call this on a genuinely live/continuous
+    // stream (there IS no "end" to flush at) or on an engine you intend to
+    // keep feeding afterward -- flushing commits to decisions made with
+    // less lookahead than normal, which is fine at a true stream end but
+    // would otherwise reduce accuracy for no reason.
+    std::vector<PeakEvent> flush();
+
 private:
+    // Runs one decision round: finalizes every not-yet-decided candidate up
+    // to and including `cutoff` (must be <= the newest buffered index),
+    // appending accepted peaks to `peaksOut`. Shared by processChunk() and
+    // flush() -- see processChunk()'s big derivation comment in the .cpp
+    // for the algorithm itself.
+    void decideUpTo( long long cutoff, std::vector<PeakEvent> &peaksOut );
+
+
     int                 templateLength_;
     int                 nChannels_;
     std::vector<double> taps_;              // as loaded, row-major [t*nChannels_+ch]
     int                 leftMargin_;        // samples of history needed before a reported index n
     int                 rightMargin_;       // samples of "future" needed after n (the reporting delay)
     long long           minSeparationSamples_;
+    long long           finalizeMarginSamples_;  // see processChunk()'s decision-block comment
 
     // History retains leftMargin_ + rightMargin_ samples (== templateLength_-1)
     // so a fresh chunk can immediately compute D for indices near its start.
@@ -84,6 +107,16 @@ private:
     long long          dBufferStartAbsIndex_;
 
     long long           lastDecidedAbsIndex_;   // last sample index already accept/reject-decided
+
+    // Already-finalized (emitted) kept peaks close enough to the decision
+    // frontier to still matter as competitors for not-yet-decided
+    // candidates -- see processChunk()'s derivation comment for why these
+    // must be reused as FIXED anchors rather than re-derived from dBuffer_
+    // each round (re-deriving after dBuffer_ has been trimmed silently
+    // loses the context that originally justified keeping them, causing
+    // occasional incorrect decisions for nearby new candidates). Ascending
+    // by position; trimmed the same way dBuffer_ is.
+    std::deque<std::pair<long long, double> > recentKeptPeaks_;
 };
 
 #endif // CLOSEDLOOP_CONVOLUTIONENGINE_H

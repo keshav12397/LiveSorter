@@ -182,6 +182,14 @@ Calibration::Result Calibration::run(
             break; // short read -- reached EOF
     }
 
+    // True end of this finite training-file stream -- flush the tail
+    // engine.processChunk() alone holds back forever waiting for future
+    // context that isn't coming (see ConvolutionEngine::flush()'s
+    // comment). Without this, the last ~finalizeMarginSamples_ worth of
+    // the file would never contribute any peaks to the sweep below.
+    std::vector<PeakEvent> flushedPeaks = engine.flush();
+    allPeaks.insert( allPeaks.end(), flushedPeaks.begin(), flushedPeaks.end() );
+
     if( allPeaks.empty() )
         throw std::runtime_error( "Calibration: convolution produced zero candidate peaks -- "
                                    "check the filter/training-file channel mapping" );
