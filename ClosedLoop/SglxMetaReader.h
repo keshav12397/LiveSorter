@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <utility>
 
 // Parses a SpikeGLX .meta file and the handful of fields Calibration needs
 // to read a raw .bin file directly (i.e. NOT via the live socket API --
@@ -39,5 +40,13 @@ std::map<std::string, std::string> parseMetaFile( const std::string &metaPath );
 // shared noise the filter's statistics were calibrated against, and
 // caused a real, large false-positive blowup found via live testing.
 std::vector<int> loadChanMapJson( const std::string &path );
+
+// Same file as loadChanMapJson(), but returns {raw_channel_id: (x, y)} from
+// the "xc"/"yc" arrays (indexed in parallel with "chanMap") -- mirrors
+// generate_filter.load_channel_positions_json(), used for
+// auto_pick_interferers_spatial()'s physical-distance ranking. Returns an
+// empty map if the file has no "xc"/"yc" fields (caller falls back to
+// index-distance, same as the Python side).
+std::map<int, std::pair<double, double> > loadChanMapPositions( const std::string &path );
 
 #endif // CLOSEDLOOP_SGLXMETAREADER_H
