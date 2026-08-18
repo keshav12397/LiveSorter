@@ -45,8 +45,17 @@ public:
     // maxChunkSamples: the largest nSamples processChunk() will ever be
     // called with (from fetchChunkMs * sampleRate) -- sizes every
     // persistent device buffer once at construction.
+    // detectionCapacity: max detections buffered per processChunk() call
+    // (default 4096, sized for live use where only rare above-threshold
+    // events are expected). The offline batch calibration path (see
+    // NoiseCovariance.h / the branch plan's Phase 4) uploads an all
+    // -infinity threshold array via GpuFilterBank::fromHostArrays() so
+    // EVERY windowed-NMS-accepted peak gets reported -- much higher volume,
+    // needs a much larger capacity (and/or a smaller chunk size) to avoid
+    // silently dropping detections past the cap.
     GpuConvolutionEngine( const GpuFilterBank &filterBank, int nChannelsGroup,
-                           int maxChunkSamples, long long minSeparationSamples = 0 );
+                           int maxChunkSamples, long long minSeparationSamples = 0,
+                           int detectionCapacity = 4096 );
     ~GpuConvolutionEngine();
 
     GpuConvolutionEngine( const GpuConvolutionEngine & ) = delete;
@@ -63,6 +72,14 @@ public:
                                              const short *d_raw, size_t nSamples,
                                              long long streamSampleOffset, void *stream );
 
+    // Forces a final decision round over whatever is currently buffered --
+    // same rationale as ConvolutionEngine::flush() (see its header comment):
+    // call ONCE at the true end of a finite stream (offline calibration
+    // scoring; never a genuinely live/continuous session) to get the last
+    // ~finalizeMarginSamples_ worth of candidates that processChunk() alone
+    // holds back forever waiting for future context that isn't coming.
+    std::vector<GpuPeakEvent> flush( void *stream );
+
 private:
     int nUnits_;
     int nChannelsPerUnit_;
@@ -70,6 +87,7 @@ private:
     int nChannelsGroup_;
     int maxChunkSamples_;
     long long minSeparationSamples_;
+    long long finalizeMarginSamples_; // see nmsDecideKernel's derivation comment in the .cu
     int leftMargin_, rightMargin_;
 
     const GpuFilterBank &filterBank_; // not owned
@@ -78,10 +96,19 @@ private:
     float     *d_dNew_;                // [nUnits_ * maxChunkSamples_] scratch, this chunk's fresh D-values
 
     int        dTailCap_;
-    float     *d_dTail_;               // [nUnits_ * dTailCap_] persistent per-unit NMS score tail
+    float     *d_dTail_;               // [nUnits_ * dTailCap_] persistent per-unit raw-D score tail
     int       *d_dTailCount_;          // [nUnits_] persistent
     long long *d_dTailStartAbsIndex_;  // [nUnits_] persistent
     long long *d_lastDecidedAbsIndex_; // [nUnits_] persistent
+
+    // Already-finalized kept peaks, persisted across kernel launches -- GPU
+    // analog of ConvolutionEngine's recentKeptPeaks_ (see its derivation
+    // comment for why these must be fixed anchors, not re-derived from
+    // d_dTail_ after trimming).
+    int        keptCap_;
+    long long *d_keptPos_;   // [nUnits_ * keptCap_]
+    float     *d_keptVal_;   // [nUnits_ * keptCap_]
+    int       *d_keptCount_; // [nUnits_]
 
     int             detectionCapacity_;
     int            *d_detectionCount_;  // [1]
