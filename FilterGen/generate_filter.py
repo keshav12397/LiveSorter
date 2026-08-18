@@ -466,6 +466,117 @@ def noise_covariance(data_sel, all_spike_times, template_length,
     return C
 
 
+def noise_covariance_vectorized(data_sel, all_spike_times, template_length,
+                                 template_offset, max_samples):
+    """Drop-in replacement for noise_covariance() -- identical inputs/output
+    (verified numerically equivalent in FilterGen tests), but computes every
+    channel-pair's cross-covariance at every lag for a segment in ONE
+    np.einsum call instead of looping over each of the n_ch*(n_ch+1)/2
+    channel pairs and calling np.correlate(mode='full') separately per pair.
+
+    That per-pair np.correlate is the real cost: it computes a FULL
+    correlation (cost O(segment_length^2)) even though only the narrow band
+    of lags -( template_length-1)..+(template_length-1) is ever used. This
+    version instead builds sliding windows only as wide as that lag band
+    (via np.lib.stride_tricks.sliding_window_view, no data copy) and gets
+    every pair/lag via one einsum, which is O(segment_length * lag_band) --
+    linear in segment length instead of quadratic. Measured effect on a
+    synthetic worst case (one ~19k-sample spike-free segment): ~3.7x faster
+    -- real, but more modest than the segment-length complexity alone
+    suggests, since np.correlate's direct-method C implementation has a much
+    better constant factor than a naive flop count assumes (see
+    test_noise_covariance_equivalence.py for the numerical-equivalence +
+    timing check this was validated against). Note
+    this alone did NOT explain the ~70x real-world slowdown seen during a
+    100-unit calibration run that prompted this change -- that was
+    independently diagnosed as external CPU contention from concurrent
+    processes, not this function. Kept anyway as a legitimate,
+    verified-correct efficiency improvement.
+
+    See _biased_xcov/noise_covariance's docstrings for the "biased" MATLAB
+    xcov convention and the L-weighting algebra this mirrors -- working
+    through that algebra shows the original's `cov_combined += L *
+    _biased_xcov(...)` (which itself divides by L internally) then a final
+    `/= total_len` reduces to: sum the RAW (un-normalized) cross-correlation
+    across every segment, divide once by total_len at the end. No
+    per-segment length weighting is actually needed in the loop below --
+    it's already cancelled out algebraically.
+    """
+    n_samples, n_ch = data_sel.shape
+    n_samples = min(n_samples, max_samples)
+    data_sel = data_sel[:n_samples]
+
+    spike_present = np.zeros(n_samples, dtype=bool)
+    for t in all_spike_times:
+        if t >= n_samples + template_length:
+            continue
+        lo = max(0, t - template_offset)
+        hi = min(n_samples, t + template_length - 1 + template_offset)
+        spike_present[lo:hi] = True
+
+    d = np.diff(spike_present.astype(np.int8))
+    starts = list(np.where(d == -1)[0] + 1)
+    ends = list(np.where(d == 1)[0] + 1)
+    if not spike_present[0]:
+        starts.insert(0, 0)
+    if not spike_present[-1]:
+        ends.append(n_samples)
+    starts, ends = np.array(starts), np.array(ends)
+
+    lengths = ends - starts
+    keep = lengths >= 2 * template_length
+    starts, ends, lengths = starts[keep], ends[keep], lengths[keep]
+    if starts.size == 0:
+        raise ValueError("No sufficiently long spike-free segments found "
+                          "for noise covariance estimation.")
+    total_len = int(lengths.sum())
+
+    maxlag = template_length - 1
+    nlags = 2 * maxlag + 1
+    acc = np.zeros((nlags, n_ch, n_ch), dtype=np.float64)  # float64 accumulator regardless of data dtype -- see fit_lcmv's precision-boundary note
+
+    for s, e, L in zip(starts, ends, lengths):
+        seg = data_sel[s:e, :].astype(np.float64)
+        seg = seg - seg.mean(axis=0, keepdims=True)  # per-segment, per-channel demean, matching _biased_xcov
+
+        padded = np.zeros((L + 2 * maxlag, n_ch), dtype=np.float64)
+        padded[maxlag:maxlag + L] = seg
+        # (nlags, n_ch, L) view, no copy -- windows[o, k, :] == padded[o:o+L, k]
+        windows = np.lib.stride_tricks.sliding_window_view(padded, L, axis=0)
+
+        # cross[o, i, k] = sum_t seg[t, i] * padded[o+t, k]
+        #                = sum_t seg[t, i] * windows[o, k, t]
+        cross = np.einsum('ti,okt->oik', seg, windows)
+
+        # Offset o and lag d relate by o = maxlag - d (derived from matching
+        # np.correlate's own indexing convention -- see class/module comment
+        # and the equivalence test this was validated against), so reversing
+        # the offset axis (o: 0..2*maxlag ascending) gives lag d: -maxlag..
+        # +maxlag ascending, same order _biased_xcov returns.
+        acc += cross[::-1]
+
+    cov_by_lag = acc / total_len  # (nlags, n_ch, n_ch), nlags axis indexed by lag d = -maxlag..maxlag
+
+    dim = template_length * n_ch
+    C = np.zeros((dim, dim))
+
+    for i in range(n_ch):
+        for k in range(i + 1):
+            cov_combined = cov_by_lag[:, i, k]  # length nlags == 2*template_length-1, same shape _biased_xcov used to return
+
+            col = cov_combined[template_length - 1:]
+            row = cov_combined[:template_length][::-1]
+            T = toeplitz(row, col)
+
+            C[i * template_length:(i + 1) * template_length,
+              k * template_length:(k + 1) * template_length] = T
+            if i != k:
+                C[k * template_length:(k + 1) * template_length,
+                  i * template_length:(i + 1) * template_length] = T.T
+
+    return C
+
+
 # --------------------------------------------------------------------- #
 # LCMV filter
 # --------------------------------------------------------------------- #

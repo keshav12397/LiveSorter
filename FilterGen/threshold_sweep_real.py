@@ -154,8 +154,12 @@ def fit_lcmv(data, spike_t, spike_cl, np_ch, target, interferer_ids,
     interferer_wfs_sel = [wf[:, sel] for wf in interferer_wfs]
 
     local_spike_times = np.sort(np.concatenate([target_spikes] + interferer_times))
-    R = gf.noise_covariance(data_sel, local_spike_times, template_length,
-                             template_offset, data_sel.shape[0])
+    # Vectorized version (numerically verified equivalent to noise_covariance,
+    # faster on long spike-free segments -- see its docstring) used for both
+    # calibrate_for_closedloop.py (single-target) and calibrate_all_units.py
+    # (batch) since they share this one fit_lcmv, not forked per-caller.
+    R = gf.noise_covariance_vectorized(data_sel, local_spike_times, template_length,
+                                        template_offset, data_sel.shape[0])
 
     s_flat = s.T.ravel()
     interferer_flats = [wf.T.ravel() for wf in interferer_wfs_sel]
