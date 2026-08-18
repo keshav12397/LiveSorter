@@ -116,8 +116,14 @@ def main():
     load_args.causal_highpass = True
 
     print("Loading + preprocessing (float32, shared across all units)...")
+    # order='F': every unit below gathers its OWN small channel subset out
+    # of this same recording -- see load_and_prepare's comment for why that
+    # access pattern needs column-major (not row-major/default) storage to
+    # avoid touching every other channel's bytes on every gather (measured
+    # 12.5x faster per-gather; single-target calibrate_for_closedloop.py
+    # doesn't use this since it only ever gathers once).
     spike_t, spike_cl, data, np_ch, fs = tsr.load_and_prepare(
-        load_args, rng, dtype=np.float32)
+        load_args, rng, dtype=np.float32, order="F")
 
     _, _, labels = gf.load_kilosort(args.ks_dir)
     positions = gf.load_channel_positions_json(args.channel_map_json) \

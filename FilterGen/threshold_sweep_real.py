@@ -33,7 +33,7 @@ import generate_filter as gf
 DEFAULT_SCRATCH_DIR = r"D:\scratch"
 
 
-def load_and_prepare(args, rng, dtype=np.float64):
+def load_and_prepare(args, rng, dtype=np.float64, order="C"):
     spike_t, spike_cl, labels = gf.load_kilosort(args.ks_dir)
     params = gf.load_params_py(args.ks_dir)
 
@@ -69,10 +69,26 @@ def load_and_prepare(args, rng, dtype=np.float64):
     os.close(tmp_fd)
     atexit.register(lambda p=tmp_path: os.path.exists(p) and os.remove(p))
 
+    # order='F' (Fortran/column-major) stores each channel's samples
+    # contiguously on disk instead of interleaving all channels per sample.
+    # Doesn't change data.shape or any indexing semantics (data[:, sel]
+    # means the same thing either way) -- but it changes what "data[:, sel]"
+    # actually has to read off disk: in the default 'C' order, extracting a
+    # handful of channels still has to touch every OTHER channel's bytes for
+    # every sample (interleaved storage), while 'F' order only reads the
+    # selected channels' own bytes. Callers that gather ONE channel subset
+    # once (calibrate_for_closedloop.py) don't need this -- 'C' is fine.
+    # Callers that gather a DIFFERENT small channel subset per unit, many
+    # times over a large shared recording (calibrate_all_units.py), do:
+    # measured 12.5x faster per-gather on a 7.7GB test file with this
+    # change (see FilterGen/test_forder_gather_equivalence.py), at the cost
+    # of a ~1.5x slower one-time streaming build (writing becomes similarly
+    # scattered instead of the reads) -- a clear net win when the same file
+    # gets gathered from dozens to hundreds of times.
     data = np.memmap(tmp_path, dtype=dtype, mode="w+",
-                      shape=(t_max_samples, n_keep))
+                      shape=(t_max_samples, n_keep), order=order)
     print(f"Streaming preprocessed data to scratch file {tmp_path} "
-          f"({data.nbytes / 1e9:.1f} GB on disk, not RAM)")
+          f"({data.nbytes / 1e9:.1f} GB on disk, not RAM, order={order!r})")
 
     # Zero-phase filtfilt needs the whole recording at once (it runs forward
     # then backward), so it can't be chunked -- fall back to loading the raw
