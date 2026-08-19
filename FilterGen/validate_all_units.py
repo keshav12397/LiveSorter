@@ -57,6 +57,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import generate_filter as gf
+import stream_alignment
 
 
 def match_spike_trains(a, b, tol):
@@ -189,15 +190,30 @@ def main():
     ap.add_argument("--wrap-samples", type=int, default=0,
                      help="The recording's true total sample count (e.g. "
                           "fileSizeBytes / (2 * nSavedChans) from its .meta). "
-                          "A live/simulated SpikeGLX session's sample counter "
-                          "keeps incrementing across every loop through the "
-                          "replayed file rather than resetting to 0 -- pass "
-                          "this so detections' sample_index (which can already "
-                          "be several loops in) gets reduced mod this value "
-                          "before comparing against Kilosort's ground truth, "
-                          "which is indexed for a single pass of the file. "
-                          "0 (default) = no wrapping, for a genuinely "
-                          "single-pass live/offline run.")
+                          "Required for any run against a looping/replayed "
+                          "SpikeGLX source: the live sample counter keeps "
+                          "incrementing across every pass through the file, "
+                          "AND is not phase-locked to the replay's own file "
+                          "read position, so mapping detections back onto "
+                          "Kilosort's single-pass ground truth needs both this "
+                          "value and a data-estimated offset -- see "
+                          "stream_alignment.py's docstring. 0 (default) = no "
+                          "wrapping/alignment, for a genuinely single-pass "
+                          "live or offline run whose sample indices already "
+                          "ARE file positions.")
+    ap.add_argument("--no-track-drift", action="store_true",
+                     help="Estimate one constant stream->file offset for the "
+                          "whole run instead of re-estimating it per block. "
+                          "Only correct if the replay source's counter never "
+                          "slips against its file position -- the source this "
+                          "was developed against slipped ~150 samples every "
+                          "~30s, which silently destroys matching over a long "
+                          "run (stream_alignment.py's docstring, point 2).")
+    ap.add_argument("--loop-pass", type=int, default=-1,
+                     help="With --wrap-samples set and multiple loop passes "
+                          "present, force analysis to this pass index (0-based, "
+                          "in run order) instead of auto-selecting the "
+                          "widest-covered one. -1 (default) = auto.")
     ap.add_argument("--out-dir", required=True)
     args = ap.parse_args()
 
@@ -212,10 +228,27 @@ def main():
         sys.exit("Detections CSV is empty -- nothing to validate.")
 
     if args.wrap_samples:
-        before = det_df["sample_index"].copy()
-        det_df["sample_index"] = det_df["sample_index"] % args.wrap_samples
-        print(f"Wrapped sample_index mod {args.wrap_samples} "
-              f"(raw range was [{before.min()}, {before.max()}])")
+        # NOT a plain `% wrap_samples`: the live counter's phase relative to
+        # the replayed file is unknown and slips during the run, and assuming
+        # otherwise makes a perfectly good detector look broken in a very
+        # specific, very convincing way -- see stream_alignment.py's docstring.
+        raw = det_df["sample_index"].values.astype(np.int64)
+        print(f"Aligning {len(raw)} detections to file coordinates "
+              f"(raw range [{raw.min()}, {raw.max()}], wrap={args.wrap_samples})...")
+        align = stream_alignment.align_detections(
+            raw, det_df["unit_id"].values, spike_t, spike_cl,
+            args.wrap_samples, track=not args.no_track_drift)
+        if not align["ok"]:
+            sys.exit("Could not find a stream->file alignment: the detections "
+                      "do not correlate with this ground truth at ANY offset. "
+                      "Check that --wrap-samples matches the replayed "
+                      "recording and that --ks-dir is that same recording's "
+                      "sort. Reporting per-unit metrics against an unaligned "
+                      "ground truth would be meaningless.")
+        det_df["sample_index"] = align["file_index"]
+        keep = stream_alignment.select_widest_pass(
+            align["file_index"], align["pass_index"], forced_pass=args.loop_pass)
+        det_df = det_df[keep].copy()
 
     # Shared active window: the run only ever fetched/detected within the
     # sample-index range it actually saw. Ground-truth spikes outside that

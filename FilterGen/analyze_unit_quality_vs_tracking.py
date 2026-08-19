@@ -41,6 +41,7 @@ from matplotlib.colors import LinearSegmentedColormap
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import generate_filter as gf
+import stream_alignment
 from validate_all_units import match_spike_trains, compute_unit_metrics
 
 # -- palette (dataviz skill's validated default instance) -------------------
@@ -115,20 +116,24 @@ def main():
                           "to the merge and an online-vs-offline F1 panel.")
     ap.add_argument("--tol", type=int, default=100)
     ap.add_argument("--wrap-samples", type=int, default=0,
-                     help="Recording's true total sample count -- see "
-                          "validate_all_units.py's --wrap-samples for why this "
-                          "matters for a looping simulated/replayed session. When "
-                          "the captured run spans MULTIPLE loop passes (common for "
-                          "a >1-file-length live run), a plain modulo merges "
-                          "detections from every pass onto the same ground-truth "
-                          "spikes -- a unit detected reliably in every pass then "
-                          "gets N-1 spurious 'extra' detections credited as false "
-                          "positives per spike (the greedy one-to-one matcher only "
-                          "accepts the first), which biases precision/recall AGAINST "
-                          "exactly the well-tracked units this analysis cares about. "
-                          "So when multiple passes are present, this script instead "
-                          "auto-selects ONE fully-covered pass (see --loop-pass) and "
-                          "analyzes only that, uncontaminated.")
+                     help="Recording's true total sample count. Needed to map a "
+                          "looping replay's ever-increasing live sample counter "
+                          "back onto Kilosort's single-pass ground truth -- but "
+                          "NOT by a plain modulo: the counter's phase relative to "
+                          "the replay's file position is unknown and drifts, so "
+                          "stream_alignment.py estimates it from the data (read "
+                          "its docstring before touching any of this). When the "
+                          "captured run spans MULTIPLE loop passes, merging them "
+                          "would credit a reliably-detected spike with N-1 "
+                          "spurious false positives (the greedy one-to-one matcher "
+                          "accepts only the first), biasing metrics AGAINST exactly "
+                          "the well-tracked units this analysis cares about -- so "
+                          "ONE pass is selected (see --loop-pass).")
+    ap.add_argument("--no-track-drift", action="store_true",
+                     help="Use one constant stream->file offset for the whole run "
+                          "instead of re-estimating per block. Only correct if the "
+                          "replay source never slips -- the one this was developed "
+                          "against slipped ~150 samples every ~30s.")
     ap.add_argument("--loop-pass", type=int, default=-1,
                      help="With --wrap-samples set and multiple loop passes present, "
                           "force analysis to this pass index (0-based) instead of "
@@ -152,46 +157,31 @@ def main():
         sys.exit("Detections CSV is empty -- nothing to analyze.")
 
     if args.wrap_samples:
-        raw_lo, raw_hi = int(det_df["sample_index"].min()), int(det_df["sample_index"].max())
-        first_pass, last_pass = raw_lo // args.wrap_samples, raw_hi // args.wrap_samples
-
-        if first_pass == last_pass:
-            # Single pass -- plain modulo is safe (matches validate_all_units.py's
-            # own handling), nothing to disambiguate.
-            det_df["sample_index"] = det_df["sample_index"] % args.wrap_samples
-            print(f"Wrapped sample_index mod {args.wrap_samples} "
-                  f"(raw range was [{raw_lo}, {raw_hi}], single loop pass)")
-        else:
-            n_passes = last_pass - first_pass + 1
-            print(f"Raw sample_index spans {n_passes} loop passes "
-                  f"({first_pass} through {last_pass}) -- selecting ONE "
-                  f"uncontaminated pass instead of merging them (see --wrap-samples "
-                  f"help for why).")
-
-            if args.loop_pass >= 0:
-                chosen = args.loop_pass
-            else:
-                # Auto: the pass whose OWN local coverage is widest -- a pass
-                # only partially observed (the run started or ended mid-pass)
-                # covers a narrower slice of the file and would undercount that
-                # pass's ground-truth spikes outside the observed slice.
-                coverage = {}
-                for p in range(first_pass, last_pass + 1):
-                    lo, hi = p * args.wrap_samples, (p + 1) * args.wrap_samples
-                    mask = (det_df["sample_index"] >= lo) & (det_df["sample_index"] < hi)
-                    if mask.any():
-                        local = det_df.loc[mask, "sample_index"] - lo
-                        coverage[p] = (local.max() - local.min(), int(mask.sum()))
-                chosen = max(coverage, key=lambda p: coverage[p][0])
-                print(f"  pass coverage (span_samples, n_rows): "
-                      + ", ".join(f"{p}={v}" for p, v in coverage.items()))
-
-            lo, hi = chosen * args.wrap_samples, (chosen + 1) * args.wrap_samples
-            det_df = det_df[(det_df["sample_index"] >= lo) & (det_df["sample_index"] < hi)].copy()
-            det_df["sample_index"] = det_df["sample_index"] - lo
-            print(f"Using loop pass {chosen} only: {len(det_df)} detection rows, "
-                  f"local sample range [{det_df['sample_index'].min()}, "
-                  f"{det_df['sample_index'].max()}]")
+        # Alignment (phase + per-block drift tracking) and pass selection both
+        # live in stream_alignment.py -- see its docstring. This used to be a
+        # plain `% wrap_samples` plus a pass picker, which handled the
+        # multi-pass problem but silently assumed the live counter's phase
+        # matched the replay's file position. It does not, and the resulting
+        # chance-level matching looks exactly like "sparse units track badly,
+        # dense units track well" -- the false finding this script was written
+        # to investigate in the first place.
+        raw = det_df["sample_index"].values.astype(np.int64)
+        print(f"Aligning {len(raw)} detections to file coordinates "
+              f"(raw range [{raw.min()}, {raw.max()}], wrap={args.wrap_samples})...")
+        align = stream_alignment.align_detections(
+            raw, det_df["unit_id"].values, spike_t, spike_cl,
+            args.wrap_samples, track=not args.no_track_drift)
+        if not align["ok"]:
+            sys.exit("Could not find a stream->file alignment: the detections "
+                      "do not correlate with this ground truth at ANY offset. "
+                      "Check --wrap-samples and that --ks-dir sorts the same "
+                      "recording the live source is replaying.")
+        det_df["sample_index"] = align["file_index"]
+        keep = stream_alignment.select_widest_pass(
+            align["file_index"], align["pass_index"], forced_pass=args.loop_pass)
+        det_df = det_df[keep].copy()
+        print(f"Using {len(det_df)} detection rows, file sample range "
+              f"[{det_df['sample_index'].min()}, {det_df['sample_index'].max()}]")
 
     lo, hi = int(det_df["sample_index"].min()), int(det_df["sample_index"].max())
     print(f"Active window: samples [{lo}, {hi}] ({(hi - lo) / 30000.0:.1f}s @ 30kHz)")
