@@ -252,7 +252,7 @@ GpuConvolutionEngine::GpuConvolutionEngine( const GpuFilterBank &filterBank, int
     :   nUnits_( filterBank.nUnits ), nChannelsPerUnit_( filterBank.nChannelsPerUnit ),
         templateLength_( filterBank.templateLength ), nChannelsGroup_( nChannelsGroup ),
         maxChunkSamples_( maxChunkSamples ), filterBank_( filterBank ),
-        d_combined_( nullptr ), d_dNew_( nullptr ),
+        d_combined_( nullptr ), d_historyScratch_( nullptr ), d_dNew_( nullptr ),
         d_dTail_( nullptr ), d_dTailCount_( nullptr ),
         d_dTailStartAbsIndex_( nullptr ), d_lastDecidedAbsIndex_( nullptr ),
         d_keptPos_( nullptr ), d_keptVal_( nullptr ), d_keptCount_( nullptr ),
@@ -282,6 +282,9 @@ GpuConvolutionEngine::GpuConvolutionEngine( const GpuFilterBank &filterBank, int
     size_t combinedCount = static_cast<size_t>( templateLength_ - 1 + maxChunkSamples_ ) * nChannelsGroup_;
     CUDA_CHECK( cudaMalloc( &d_combined_, combinedCount * sizeof(float) ) );
     CUDA_CHECK( cudaMemset( d_combined_, 0, combinedCount * sizeof(float) ) ); // zero history at startup -- see class comment
+
+    CUDA_CHECK( cudaMalloc( &d_historyScratch_,
+                             static_cast<size_t>( templateLength_ - 1 ) * nChannelsGroup_ * sizeof(float) ) );
 
     CUDA_CHECK( cudaMalloc( &d_dNew_, static_cast<size_t>( nUnits_ ) * maxChunkSamples_ * sizeof(float) ) );
 
@@ -320,6 +323,7 @@ GpuConvolutionEngine::GpuConvolutionEngine( const GpuFilterBank &filterBank, int
 GpuConvolutionEngine::~GpuConvolutionEngine()
 {
     if( d_combined_ )              cudaFree( d_combined_ );
+    if( d_historyScratch_ )        cudaFree( d_historyScratch_ );
     if( d_dNew_ )                  cudaFree( d_dNew_ );
     if( d_dTail_ )                 cudaFree( d_dTail_ );
     if( d_dTailCount_ )            cudaFree( d_dTailCount_ );
@@ -377,11 +381,28 @@ std::vector<GpuPeakEvent> GpuConvolutionEngine::processChunk(
     // Carry the last (L-1) rows of this chunk's combined data forward as
     // history for the next call -- same overlap-save pattern as
     // ConvolutionEngine::processChunk's history_.assign(...) tail-keep.
+    //
+    // Staged through d_historyScratch_ rather than copied within
+    // d_combined_ directly: source and destination OVERLAP whenever
+    // nSamples < (L-1), and cudaMemcpy on overlapping device ranges is
+    // undefined behavior exactly as memcpy's is (worse here -- the copy runs
+    // as a parallel kernel, so a block can write a destination element that
+    // another block has not read as its source yet, silently splicing
+    // time-shifted signal into the history). Live fetches hit this
+    // constantly: at fetchChunkMs=5 the loop consumes whatever SpikeGLX has
+    // ready with no pacing, and on a real 3-minute run 31% of 84,111 chunks
+    // came back with fewer than the L-1=60 samples needed to make the ranges
+    // disjoint (1,059 of them were a single sample). No test exercised it:
+    // the NMS equivalence tests run at chunkSamples=2000, OfflineScorer.cu
+    // at 2000 or 150, all >= 60.
     size_t totalRows = static_cast<size_t>( templateLength_ - 1 ) + nSamples;
     size_t keepRows  = static_cast<size_t>( templateLength_ - 1 );
     if( totalRows > keepRows ) {
         const float *tailSrc = d_combined_ + (totalRows - keepRows) * nChannelsGroup_;
-        CUDA_CHECK( cudaMemcpyAsync( d_combined_, tailSrc, keepRows * nChannelsGroup_ * sizeof(float),
+        size_t keepBytes = keepRows * nChannelsGroup_ * sizeof(float);
+        CUDA_CHECK( cudaMemcpyAsync( d_historyScratch_, tailSrc, keepBytes,
+                                      cudaMemcpyDeviceToDevice, stream ) );
+        CUDA_CHECK( cudaMemcpyAsync( d_combined_, d_historyScratch_, keepBytes,
                                       cudaMemcpyDeviceToDevice, stream ) );
     }
 

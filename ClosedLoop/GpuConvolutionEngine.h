@@ -93,6 +93,7 @@ private:
     const GpuFilterBank &filterBank_; // not owned
 
     float     *d_combined_;           // [(templateLength_-1+maxChunkSamples_) * nChannelsGroup_], history in the first (templateLength_-1) rows
+    float     *d_historyScratch_;     // [(templateLength_-1) * nChannelsGroup_], staging for the overlap-save carry-forward -- see the .cu
     float     *d_dNew_;                // [nUnits_ * maxChunkSamples_] scratch, this chunk's fresh D-values
 
     int        dTailCap_;
