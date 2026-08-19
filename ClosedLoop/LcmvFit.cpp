@@ -145,7 +145,10 @@ std::pair<double, double> peakChannelAndPos(
 
 
 std::vector<long long> autoPickInterferersSpatial(
-    const ScratchMemmap &data, const KilosortData &ks, const std::vector<int> &npCh,
+    const ScratchMemmap &data,
+    const std::map<long long, std::vector<long long> > &spikesByCluster,
+    const std::map<long long, std::string> &labels,
+    const std::vector<int> &npCh,
     long long targetId, int nInterferers, int templateLength, int templateOffset,
     const std::map<int, std::pair<double, double> > &channelPositions,
     unsigned int seed )
@@ -154,12 +157,14 @@ std::vector<long long> autoPickInterferersSpatial(
     int poolSize = std::max( 3 * nInterferers, 30 );
 
     // Rank all non-target, non-noise clusters by spike count descending --
-    // mirrors auto_pick_interferers_spatial()'s two-stage shortlist.
-    std::map<long long, long long> counts;
-    for( size_t i = 0; i < ks.spikeClusters.size(); ++i )
-        ++counts[ks.spikeClusters[i]];
-
-    std::vector<std::pair<long long, long long> > byCount( counts.begin(), counts.end() ); // (id, count)
+    // mirrors auto_pick_interferers_spatial()'s two-stage shortlist. Sizes
+    // come straight from the already-grouped map, no re-scan of the flat
+    // spike arrays.
+    std::vector<std::pair<long long, long long> > byCount; // (id, count)
+    byCount.reserve( spikesByCluster.size() );
+    for( std::map<long long, std::vector<long long> >::const_iterator it = spikesByCluster.begin();
+         it != spikesByCluster.end(); ++it )
+        byCount.push_back( std::make_pair( it->first, static_cast<long long>( it->second.size() ) ) );
     std::sort( byCount.begin(), byCount.end(),
                []( const std::pair<long long, long long> &a, const std::pair<long long, long long> &b ) {
                    return a.second > b.second;
@@ -170,8 +175,8 @@ std::vector<long long> autoPickInterferersSpatial(
         long long cid = byCount[i].first;
         if( cid == targetId )
             continue;
-        std::map<long long, std::string>::const_iterator labIt = ks.labels.find( cid );
-        if( labIt != ks.labels.end() ) {
+        std::map<long long, std::string>::const_iterator labIt = labels.find( cid );
+        if( labIt != labels.end() ) {
             std::string lab = labIt->second;
             std::transform( lab.begin(), lab.end(), lab.begin(), ::tolower );
             if( lab == "noise" )
@@ -180,12 +185,10 @@ std::vector<long long> autoPickInterferersSpatial(
         pool.push_back( cid );
     }
 
-    auto spikesFor = [&]( long long cid ) {
-        std::vector<long long> out;
-        for( size_t i = 0; i < ks.spikeClusters.size(); ++i )
-            if( ks.spikeClusters[i] == cid )
-                out.push_back( ks.spikeTimes[i] );
-        return out;
+    auto spikesFor = [&]( long long cid ) -> const std::vector<long long> & {
+        static const std::vector<long long> empty;
+        std::map<long long, std::vector<long long> >::const_iterator it = spikesByCluster.find( cid );
+        return it != spikesByCluster.end() ? it->second : empty;
     };
 
     std::pair<double, double> targetPos = peakChannelAndPos(
@@ -195,7 +198,7 @@ std::vector<long long> autoPickInterferersSpatial(
     std::vector<std::pair<double, long long> > scored; // (distance, cid)
     for( size_t i = 0; i < pool.size(); ++i ) {
         long long cid = pool[i];
-        std::vector<long long> sp = spikesFor( cid );
+        const std::vector<long long> &sp = spikesFor( cid );
         if( sp.empty() )
             continue;
         std::pair<double, double> pos;

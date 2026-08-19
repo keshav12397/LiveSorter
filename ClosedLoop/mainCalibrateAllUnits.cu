@@ -124,6 +124,13 @@ int main( int argc, char **argv )
 
     try {
         auto t0 = std::chrono::steady_clock::now();
+        auto tStage = t0;
+        auto lap = [&]( const char *label ) {
+            auto now = std::chrono::steady_clock::now();
+            std::cout << "  [" << label << ": "
+                       << std::chrono::duration<double>( now - tStage ).count() << "s]\n";
+            tStage = now;
+        };
 
         Config cfg = Config::load( argv[1] );
 
@@ -174,6 +181,7 @@ int main( int argc, char **argv )
             /*maxSamples=*/0, preprocessChunkSamples, scratchPath );
         std::cout << "  " << nSamplesTotal << " samples ("
                    << (nSamplesTotal / meta.sampleRateHz) << "s)\n";
+        lap( "preprocess" );
 
         long long splitT = static_cast<long long>( trainFrac * nSamplesTotal );
         double testDurationSeconds = (nSamplesTotal - splitT) / meta.sampleRateHz;
@@ -261,7 +269,7 @@ int main( int argc, char **argv )
 
             try {
                 pr.interfererIds = autoPickInterferersSpatial(
-                    fullView, ks, carChannelIds, pr.unitId, autoInterferers,
+                    fullView, spikesByCluster, ks.labels, carChannelIds, pr.unitId, autoInterferers,
                     templateLength, templateOffset, positions, unitSeed );
                 if( pr.interfererIds.empty() )
                     throw std::runtime_error( "no interferers found nearby" );
@@ -327,6 +335,7 @@ int main( int argc, char **argv )
             if( prep[u].ok )
                 ++nPrepOk;
         std::cout << "  " << nPrepOk << "/" << candidates.size() << " units prepped successfully.\n";
+        lap( "per-unit prep" );
 
         // ---- Phase 2: batched GPU noise covariance, ONE kernel launch for
         // every prepped unit -- the whole point of this port (see NoiseCovariance.h).
@@ -375,6 +384,7 @@ int main( int argc, char **argv )
             unitChannelsFlat, segmentsFlat, segmentOffsets, segmentCounts, nCovUnits );
 
         cudaFree( d_trainData );
+        lap( "batched noise covariance" );
 
         // ---- Phase 3 (LCMV solve): per unit, CPU -----------------------------
         std::cout << "Solving LCMV filter for each unit...\n";
@@ -414,6 +424,7 @@ int main( int argc, char **argv )
             }
         }
         std::cout << "  " << fits.size() << "/" << candidates.size() << " units fit successfully.\n";
+        lap( "LCMV solve" );
 
         // ---- Phase 4: batched GPU threshold-sweep scoring, ONE streaming
         // pass over the held-out test split for every fit unit at once.
@@ -440,6 +451,7 @@ int main( int argc, char **argv )
                 unitIdsInt, unitChannelsInCarGroup, unitFilters, templateLength, nChannels,
                 splitT, nSamplesTotal - splitT, scoreChunkSamples, minSep, detectionCapacity );
         }
+        lap( "batched offline scoring" );
 
         // ---- Threshold sweep per unit, pick best F1 ---------------------------
         struct SummaryRow {
@@ -500,6 +512,7 @@ int main( int argc, char **argv )
 
             summaryRows.push_back( row );
         }
+        lap( "threshold sweep" );
 
         // Failed units (prep or fit stage) go into the summary too, matching
         // calibrate_all_units.py's summary.csv (one row per attempted unit).

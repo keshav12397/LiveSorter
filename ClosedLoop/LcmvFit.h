@@ -7,7 +7,6 @@
 #include <string>
 
 #include "ScratchMemmap.h"
-#include "KilosortReader.h"
 
 // C++ port of FilterGen/generate_filter.py's fit-side functions (NOT the
 // noise-covariance estimation -- see NoiseCovariance.h/.cu for that, GPU-
@@ -42,8 +41,23 @@ std::vector<int> selectChannels( const std::vector<double> &targetWf,
 // distance (channelPositions, raw channel id -> (x,y)) from the target's
 // own peak channel. npCh: the full channel group's raw SpikeGLX ids, in the
 // same order as data's columns (index i of npCh <-> data column i).
+//
+// spikesByCluster: EVERY cluster's spike times, already grouped and sorted
+// ascending (cluster id -> ascending spike times) -- takes this instead of
+// KilosortData's flat parallel arrays so a caller processing many units
+// (e.g. mainCalibrateAllUnits.cu, one call per candidate unit) builds this
+// grouping ONCE up front rather than this function re-scanning the full
+// (multi-million-spike) flat arrays from scratch on every call. That
+// re-scan was exactly this function's original implementation and measured
+// as the dominant per-unit cost in the batch calibration driver (O(pool
+// size x total spike count) per unit -- ~330s of a ~760s/157-unit run) --
+// fixed here, not worked around by the caller, since every caller of this
+// function pays the same O(nSpikes) cost either way.
 std::vector<long long> autoPickInterferersSpatial(
-    const ScratchMemmap &data, const KilosortData &ks, const std::vector<int> &npCh,
+    const ScratchMemmap &data,
+    const std::map<long long, std::vector<long long> > &spikesByCluster,
+    const std::map<long long, std::string> &labels,
+    const std::vector<int> &npCh,
     long long targetId, int nInterferers, int templateLength, int templateOffset,
     const std::map<int, std::pair<double, double> > &channelPositions,
     unsigned int seed );
