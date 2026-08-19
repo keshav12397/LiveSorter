@@ -7,4 +7,4 @@
 *.bin
 *.pyc
 *.tsv
-*.meta
+*.meta*.log

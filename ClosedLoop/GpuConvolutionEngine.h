@@ -47,8 +47,8 @@ public:
     // persistent device buffer once at construction.
     // detectionCapacity: max detections buffered per processChunk() call
     // (default 4096, sized for live use where only rare above-threshold
-    // events are expected). The offline batch calibration path (see
-    // NoiseCovariance.h / the branch plan's Phase 4) uploads an all
+    // events are expected). The offline batch calibration path
+    // (mainCalibrateAllUnits.cu, see OfflineScorer.h) uploads an all
     // -infinity threshold array via GpuFilterBank::fromHostArrays() so
     // EVERY windowed-NMS-accepted peak gets reported -- much higher volume,
     // needs a much larger capacity (and/or a smaller chunk size) to avoid

@@ -74,8 +74,7 @@ def load_and_prepare(args, rng, dtype=np.float64, order="C"):
     # Doesn't change data.shape or any indexing semantics (data[:, sel]
     # means the same thing either way). In isolation this makes a channel
     # gather much cheaper (measured 12-14x faster reading a handful of
-    # channels back out of an already-built file -- see
-    # FilterGen/test_forder_gather_equivalence.py): 'C' order has to touch
+    # channels back out of an already-built file): 'C' order has to touch
     # every OTHER channel's bytes for every sample just to extract a few
     # columns, 'F' order only reads the selected channels' own bytes.
     #

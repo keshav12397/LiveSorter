@@ -16,7 +16,7 @@
 // hands the whole group to GpuPreprocessor+GpuConvolutionEngine, which score
 // every unit in the given GpuFilterBank simultaneously on the GPU.
 //
-// Detection-only (see the all_units branch plan): no DecisionThread/DO
+// Detection-only: no DecisionThread/DO
 // wiring here, and unlike ImecFetchThread this does NOT push into a
 // ThreadSafeQueue<SpikeEvent> -- there is currently no consumer for
 // per-unit spike events in this mode, and queuing into an un-drained queue

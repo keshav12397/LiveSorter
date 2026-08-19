@@ -28,9 +28,9 @@ struct GpuFilterBank {
     // SpikeGLX channel indices (same convention as channels.bin / the
     // existing single-target FilterBank.channels) -- NOT yet indices into
     // the preprocessed CAR-group buffer GpuConvolutionEngine actually reads
-    // from. ImecFetchThreadGPU::setup() translates raw id -> CAR-group
+    // from. ImecFetchThreadGPU::fetchLoop() translates raw id -> CAR-group
     // position once at startup and re-uploads the translated array over
-    // this same pointer before the fetch loop starts (mirrors
+    // this same pointer before entering the fetch loop proper (mirrors
     // ImecFetchThread.cpp's filterIndexWithinCarGroup translation).
     int   *d_channels;
     float *d_filters;     // device, float32[nUnits * templateLength * nChannelsPerUnit], row-major [unit][t][c]
@@ -49,15 +49,15 @@ struct GpuFilterBank {
     static GpuFilterBank load( const std::string &dir, int nChannelsPerUnit, int templateLength );
 
     // Builds a GpuFilterBank directly from in-memory host arrays instead of
-    // reading the packed files -- for the batch calibration path (see
-    // NoiseCovariance.h / the branch plan's Phase 4), where the filter bank
-    // is being CONSTRUCTED, not loaded from a previous run's output.
+    // reading the packed files -- for the batch calibration path
+    // (mainCalibrateAllUnits.cu, see OfflineScorer.h), where the filter
+    // bank is being CONSTRUCTED, not loaded from a previous run's output.
     // channels: int[nUnits * nChannelsPerUnit], already translated to
     // indices within the CAR/preprocessed channel group (same convention
-    // ImecFetchThreadGPU::setup() produces for the live path -- caller's
+    // ImecFetchThreadGPU::fetchLoop() produces for the live path -- caller's
     // responsibility here, this does no translation). thresholds: pass all
     // -infinity to make every windowed-NMS-accepted peak get reported
-    // unconditionally (GpuConvolutionEngine's existing nmsThresholdKernel
+    // unconditionally (GpuConvolutionEngine's existing nmsDecideKernel
     // reused completely unmodified -- see NoiseCovariance.h's sibling
     // offline scoring driver for why this is preferred over a second kernel
     // variant).

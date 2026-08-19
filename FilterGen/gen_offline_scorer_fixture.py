@@ -10,7 +10,7 @@ threshold gating) via the real, already-validated Python functions, and
 dumps everything the C++ offline GPU scorer needs to reproduce the same
 peak list: the filter taps/channels, the CAR channel group (raw ids, for
 translating channels into CAR-group indices the same way
-ImecFetchThreadGPU::setup() does), and the expected peak list.
+ImecFetchThreadGPU::fetchLoop() does), and the expected peak list.
 
 Isolates OfflineScorer.cu (streaming raw .bin -> GpuPreprocessor ->
 GpuConvolutionEngine with an all -infinity threshold) from the fit step

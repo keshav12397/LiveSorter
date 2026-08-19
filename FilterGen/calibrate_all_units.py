@@ -320,9 +320,8 @@ def main():
     # Drop the main process's read-write handle onto the scratch file before
     # workers each open their own read-only handle onto it. load_and_prepare
     # already flushed all writes; nothing further is written to this file --
-    # but per the same Windows sharing-mode caution documented in
-    # test_forder_gather_equivalence.py, an open memmap handle needs to be
-    # explicitly released (del + gc) before other opens onto the same file
+    # but on Windows an open memmap handle needs to be explicitly released
+    # (del + gc) before other opens onto the same file
     # are guaranteed to behave, rather than assuming a lingering w+ handle is
     # harmless to read past.
     data_path, data_dtype, data_shape = data.filename, data.dtype, data.shape

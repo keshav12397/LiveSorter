@@ -625,8 +625,7 @@ def compute_threshold(D, all_spike_times, template_length, template_offset, k=5.
     collapses that term to a constant and lets the sparse-firing log-prior
     term dominate completely -- producing a threshold far outside the
     filter's actual output range and suppressing every detection. (Caught
-    by testing this script against a synthetic dataset -- see
-    FilterGen/eval_synthetic.py.)
+    by testing this script against a synthetic dataset.)
 
     Instead, calibrate directly from the filter's own output: estimate the
     background noise level of D(t) during periods with no known spike from

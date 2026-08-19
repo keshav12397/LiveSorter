@@ -4,11 +4,11 @@
 // (templateLength-1), and for ragged chunk sizes that change every call.
 //
 // Why this regime specifically: every other GPU test/validation in this repo
-// streams fixed chunks of 2000 samples (the NMS equivalence tests,
-// OfflineScorer.cu's default) or 150 (test_chunksize_diagnostic.cu). The
-// live pipeline does neither. ImecFetchThreadGPU.cu's fetch loop has no
-// pacing -- it takes whatever SpikeGLX has buffered and immediately asks
-// again -- so its chunks are ragged and often tiny: on a real 3-minute
+// streams fixed chunks of 2000 samples (the NMS equivalence tests, and
+// OfflineScorer.cu's default). The live pipeline does neither.
+// ImecFetchThreadGPU.cu's fetch loop consumes whatever SpikeGLX has
+// buffered rather than waiting for a full chunk, so its chunks are
+// ragged and often tiny: on a real 3-minute
 // all-units run, 31% of 84,111 chunks were under 60 samples and 1,059 of
 // them were a single sample. That is exactly where GpuConvolutionEngine's
 // overlap-save carry-forward used to copy a device range onto an OVERLAPPING

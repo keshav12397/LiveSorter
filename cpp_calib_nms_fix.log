@@ -1,6 +1,0 @@
-Loaded filter for target 74: 5 channels, initial threshold=0.329353
-Running calibration against training data...
-Calibration done: threshold=0.702603  recall=0.981002  precision=0.991274  f1=0.986111  fpRateHz=0.00757601
-Connected 3 handles to localhost:4142 (version SpikeGLX v20251218 api v4.1.3)
-Starting fetch/decision threads. Press Ctrl+C to stop.
-EXIT=1
