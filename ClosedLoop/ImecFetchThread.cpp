@@ -102,7 +102,23 @@ void ImecFetchThread::fetchLoop()
 
     const long long chunkSamples = static_cast<long long>( fetchChunkMs_ / 1000.0 * sampleRate + 0.5 );
 
-    ConvolutionEngine engine( filterBank_.templateLength, nFilterChans, filterBank_.taps );
+    // minSeparationSamples: templateLength/2, same convention Calibration.cpp's
+    // own held-out threshold sweep already uses to pick this filter's
+    // threshold in the first place -- omitting it here left it at the
+    // constructor's default of 0 (no minimum separation enforced between
+    // accepted peaks at all), a real behavioral mismatch between how the
+    // threshold was VALIDATED (with proper NMS) and how detection actually
+    // RUNS live (without it). High-SNR/high-firing units' true spike peaks
+    // still dominate their local neighborhood regardless, but for a lower-SNR
+    // or sparsely-firing unit, ordinary near-threshold noise can register as
+    // multiple separate, unsuppressed detections at roughly the calibrated
+    // rate but at essentially unrelated times to the real spikes -- found via
+    // the all-units GPU pipeline's identical omission (ImecFetchThreadGPU.cu),
+    // confirmed there against real ground truth, then found here too by
+    // inspection since both fetch threads independently construct their
+    // convolution engine without passing this.
+    const long long minSep = filterBank_.templateLength / 2;
+    ConvolutionEngine engine( filterBank_.templateLength, nFilterChans, filterBank_.taps, minSep );
     Preprocessor       preprocessor( nCarChans, highpassCutoffHz_, sampleRate, applyHighpass_, applyCar );
     SyncEdgeTracker    syncTracker( sampleRate );
 

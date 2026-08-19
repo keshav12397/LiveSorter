@@ -138,7 +138,25 @@ void ImecFetchThreadGPU::fetchLoop()
     const int maxChunkSamples = static_cast<int>( chunkSamples ) + 1; // small slack for rounding
 
     GpuPreprocessor preprocessor( nCarChans, highpassCutoffHz_, sampleRate, applyHighpass_, applyCar );
-    GpuConvolutionEngine engine( filterBank_, nCarChans, maxChunkSamples );
+    // minSeparationSamples: templateLength/2, same convention every other
+    // caller uses (Calibration.cpp's single-target CPU path, OfflineScorer.cu's
+    // batch calibration scoring, every NMS equivalence test) -- omitting this
+    // here left it at the constructor's default of 0, meaning the windowed-NMS
+    // decision kernel enforced NO minimum separation between accepted peaks at
+    // all. High-SNR/high-firing units' true spike peaks still dominated their
+    // local neighborhood regardless, but for lower-SNR or sparsely-firing
+    // units this let ordinary near-threshold noise fluctuations register as
+    // separate, unsuppressed detections firing at roughly the calibrated rate
+    // but at essentially unrelated times to the real spikes -- found via a
+    // live all-units run where several units' detection COUNT matched their
+    // Kilosort ground-truth count closely while almost none of the individual
+    // timestamps did, then confirmed by reproducing the SAME filter/threshold
+    // through the already-validated OfflineScorer.cu (which always passes
+    // this correctly) and seeing it score exactly as well as calibration
+    // predicted -- isolating the bug to this constructor call, not the shared
+    // GPU kernel, the data, or the fit.
+    const long long minSep = filterBank_.templateLength / 2;
+    GpuConvolutionEngine engine( filterBank_, nCarChans, maxChunkSamples, minSep );
     SyncEdgeTracker syncTracker( sampleRate );
 
     // Pinned host staging buffer for the CAR-group-only (SY stripped)

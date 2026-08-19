@@ -124,11 +124,33 @@ int main( int argc, char **argv )
         SetConsoleCtrlHandler( consoleCtrlHandler, TRUE );
 #endif
 
-        std::cout << "Starting all-units GPU detection. Press Ctrl+C to stop.\n";
+        // 0 (default) = run until Ctrl+C, same as before. A finite duration
+        // lets this run unattended (e.g. from a script/background task) for
+        // a fixed-length live session without needing an external process
+        // to deliver Ctrl+C at the right moment -- stop()/join() below are
+        // the same graceful shutdown path either way, so spikeTimesPath's
+        // last few chunks aren't lost to an abrupt kill.
+        int runDurationSec = cfg.getInt( "runDurationSec", 0 );
+
+        std::cout << "Starting all-units GPU detection. ";
+        if( runDurationSec > 0 )
+            std::cout << "Will stop automatically after " << runDurationSec << "s.\n";
+        else
+            std::cout << "Press Ctrl+C to stop.\n";
         imecThread.start();
 
-        while( !g_stopRequested.load() )
+        auto runStart = std::chrono::steady_clock::now();
+        while( !g_stopRequested.load() ) {
+            if( runDurationSec > 0 ) {
+                double elapsed = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - runStart ).count();
+                if( elapsed >= runDurationSec ) {
+                    std::cout << "Reached runDurationSec (" << runDurationSec << "s), stopping...\n";
+                    break;
+                }
+            }
             std::this_thread::sleep_for( std::chrono::milliseconds( 100 ) );
+        }
 
         std::cout << "Stopping...\n";
         imecThread.stop();
