@@ -29,6 +29,7 @@ DecisionThread::DecisionThread( void *hSglx, ThreadSafeQueue<SpikeEvent> &spikeQ
         spikeCountThreshold_( spikeCountThreshold ), doLine_( doLine ), doPulseMs_( doPulseMs ),
         decisionUnitIds_( decisionUnitIds ), countsAllUnits_( decisionUnitIds.empty() ),
         publisher_( publisher ),
+        maxSpikeBacklogSeen_( 0 ), nextBacklogWarnAt_( 1000 ),
         lineHigh_( false ), stopFlag_( false )
 {
     // Sorted once here so onSpikeEvent can binary-search instead of doing a
@@ -58,16 +59,70 @@ void DecisionThread::runLoop()
 
     while( !stopFlag_.load() ) {
 
-        SpikeEvent spk;
-        if( spikeQueue_.waitPop( spk, 1 ) )
-            onSpikeEvent( spk );
-
+        // Drain both queues completely each pass, rather than taking one
+        // event from each.
+        //
+        // The previous form took at most one spike and one syllable per
+        // iteration, and since the syllable queue is empty almost all the
+        // time, its waitPop() blocked the full 1 ms timeout on essentially
+        // every pass. That capped the whole loop near 1000 events/s. With
+        // one hand-picked target firing at ~1 Hz there was three orders of
+        // magnitude of headroom and nothing ever showed. The all-units
+        // pipeline pushes every unit's detections into this same queue at
+        // ~1500/s, which exceeds the cap permanently: the queue grows
+        // without bound for the length of the session, and every decision
+        // is made on events that are further and further in the past. It
+        // presents as trials whose spike counts sit at 0-1 while the
+        // detections that should have filled them are still queued.
+        //
+        // Syllables are drained BEFORE spikes, which the one-at-a-time
+        // form's ordering made irrelevant but batching does not:
+        // onSpikeEvent() only counts a spike against syllables ALREADY
+        // pending, so draining a batch of spikes first would evaluate all
+        // of them against a window that this same pass is about to open.
+        //
+        // Known limit, unchanged by this fix and not addressed here: the
+        // two fetch threads are independent, so arrival order does not
+        // strictly follow stream-time order. A spike can still arrive
+        // slightly ahead of the syllable whose window it belongs to and be
+        // missed. Making that airtight needs the decision to run on stream
+        // time with a bounded reorder buffer, not on arrival order -- a
+        // design change to evaluateSyllable()'s contract, not a scheduling
+        // tweak.
         SyllableEvent syl;
-        if( syllableQueue_.waitPop( syl, 1 ) )
+        while( syllableQueue_.tryPop( syl ) )
             onSyllableEvent( syl );
+
+        SpikeEvent spk;
+        bool anySpike = false;
+        while( spikeQueue_.tryPop( spk ) ) {
+            onSpikeEvent( spk );
+            anySpike = true;
+        }
 
         pruneExpired();
         lowerLineIfDue();
+
+        // Only block when there was genuinely nothing to do, so an idle
+        // loop still yields the CPU and still checks stopFlag_ promptly.
+        if( !anySpike && syllableQueue_.empty() ) {
+            if( spikeQueue_.waitPop( spk, 1 ) )
+                onSpikeEvent( spk );
+        }
+
+        // Backlog is the symptom that the bug above produced silently for
+        // an entire session. Report it once per threshold crossing rather
+        // than per event, so a genuinely overloaded run says so and a
+        // healthy one stays quiet.
+        size_t backlog = spikeQueue_.size();
+        if( backlog > maxSpikeBacklogSeen_ ) {
+            maxSpikeBacklogSeen_ = backlog;
+            if( backlog >= nextBacklogWarnAt_ ) {
+                std::cerr << "DecisionThread: spike queue backlog " << backlog
+                          << " -- decisions are running behind the detector\n";
+                nextBacklogWarnAt_ *= 10;
+            }
+        }
     }
 
     sglx_ni_DO_set( hSglx_, doLine_, kLineLowBits );

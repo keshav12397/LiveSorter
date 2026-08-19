@@ -41,10 +41,36 @@ public:
         return true;
     }
 
+    // Non-blocking pop. Returns false immediately when the queue is empty.
+    //
+    // Exists so a consumer can DRAIN a queue instead of taking one item per
+    // iteration, which is not a cosmetic distinction here: DecisionThread's
+    // loop used to take at most one event per pass and block up to 1 ms on
+    // whichever queue was empty, capping it near 1000 events/s. A single
+    // target unit fires at ~1 Hz so nothing ever showed, but the all-units
+    // pipeline pushes every unit's detections into the same queue at
+    // ~1500/s, which outruns that cap permanently -- the queue then grows
+    // without bound and the decisions run on ever-staler events.
+    bool tryPop( T &out )
+    {
+        std::lock_guard<std::mutex> lock( mutex_ );
+        if( queue_.empty() )
+            return false;
+        out = queue_.front();
+        queue_.pop();
+        return true;
+    }
+
     bool empty() const
     {
         std::lock_guard<std::mutex> lock( mutex_ );
         return queue_.empty();
+    }
+
+    size_t size() const
+    {
+        std::lock_guard<std::mutex> lock( mutex_ );
+        return queue_.size();
     }
 
 private:

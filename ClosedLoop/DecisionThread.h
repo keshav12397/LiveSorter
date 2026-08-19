@@ -89,6 +89,14 @@ private:
 
     std::deque<PendingSyllable> pending_;
 
+    // Watermark and next-warning threshold for the spike queue's depth. A
+    // consumer that cannot keep up with its producer used to fail silently
+    // for a whole session (see runLoop's comment); this makes it say so, on
+    // a decade scale so a struggling run reports a handful of times instead
+    // of continuously.
+    size_t maxSpikeBacklogSeen_;
+    size_t nextBacklogWarnAt_;
+
     bool lineHigh_;
     std::chrono::steady_clock::time_point lineHighUntil_;
 
