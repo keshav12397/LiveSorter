@@ -283,7 +283,10 @@ int main( int argc, char **argv )
                 long long nUsed = 0;
                 std::vector<double> targetWf = meanWaveform(
                     trainView, targetTrain, templateLength, templateOffset, maxSpikes, unitSeed, nUsed );
-                pr.nTrainSpikes = nUsed;
+                // Total train-split spike count, matching Python's summary.csv
+                // n_train_spikes (len(target_train)) -- NOT meanWaveform's nUsed,
+                // which is the maxSpikes-subsampled count actually averaged.
+                pr.nTrainSpikes = static_cast<long long>( targetTrain.size() );
 
                 std::vector<std::vector<double> > interfererWfs;
                 for( size_t k = 0; k < pr.interfererIds.size(); ++k ) {
