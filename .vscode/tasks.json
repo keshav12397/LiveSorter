@@ -113,6 +113,44 @@
             ]
         },
         {
+            "label": "build calibrate all units gpu",
+            "type": "shell",
+            "command": "nvcc",
+            "args": [
+                "-ccbin", "cl.exe",
+                "-std=c++17",
+                "-gencode=arch=compute_80,code=compute_80",
+                "-o", "CalibrateAllUnits.exe",
+                "ClosedLoop/mainCalibrateAllUnits.cu",
+                "ClosedLoop/Config.cpp",
+                "ClosedLoop/SglxMetaReader.cpp",
+                "ClosedLoop/KilosortReader.cpp",
+                "ClosedLoop/LcmvFit.cpp",
+                "ClosedLoop/NoiseCovariance.cu",
+                "ClosedLoop/OfflinePreprocessor.cu",
+                "ClosedLoop/OfflineScorer.cu",
+                "ClosedLoop/ThresholdSweep.cpp",
+                "ClosedLoop/GpuFilterBank.cu",
+                "ClosedLoop/GpuPreprocessor.cu",
+                "ClosedLoop/GpuConvolutionEngine.cu",
+                "-I", "SDK/API",
+                "-I", "ClosedLoop"
+            ],
+            "options": {
+                "env": {
+                    "PATH": "C:\\Program Files (x86)\\Microsoft Visual Studio\\2017\\Community\\VC\\Tools\\MSVC\\14.16.27023\\bin\\Hostx64\\x64;${env:PATH}",
+                    "LIB": "C:\\Program Files (x86)\\Microsoft Visual Studio\\2017\\Community\\VC\\Tools\\MSVC\\14.16.27023\\ATLMFC\\lib\\x64;C:\\Program Files (x86)\\Microsoft Visual Studio\\2017\\Community\\VC\\Tools\\MSVC\\14.16.27023\\lib\\x64;C:\\Program Files (x86)\\Windows Kits\\10\\lib\\10.0.19041.0\\ucrt\\x64;C:\\Program Files (x86)\\Windows Kits\\10\\lib\\10.0.19041.0\\um\\x64"
+                }
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "problemMatcher": [
+                "$msCompile"
+            ]
+        },
+        {
             "type": "cppbuild",
             "label": "C/C++: cl.exe build active file",
             "command": "cl.exe",
