@@ -11,6 +11,14 @@
 // this bounds how large a chunk this engine can be constructed for; checked
 // at construction time (throws rather than silently corrupting/overflowing
 // a fixed-size local array).
+//
+// This value directly sets nmsDecideKernel's per-thread local-memory frame
+// (~106 KB), so it is not free. It is also far larger than any configuration
+// in use needs: dTailCap_ is maxChunkSamples + 2*finalizeMargin + 16, which
+// at the live default (fetchChunkMs=5, 30 kHz, templateLength=61) is 406,
+// and at OfflineScorer.cu's 2000-sample chunks is 2496. Left at 4096 as
+// headroom rather than tuned per configuration -- but if this kernel ever
+// needs to get cheaper, shrinking this is the first lever, not the last.
 #define MAX_CAND 4096
 
 namespace {
@@ -74,6 +82,16 @@ __global__ void matchedFilterKernel(
 // thread (this per-unit decision chain is inherently sequential, and is
 // short given the enormous compute margin at this problem size, same
 // rationale the original version of this kernel already used).
+//
+// LAUNCH WITH EXACTLY ONE THREAD PER BLOCK. Every thread but 0 returns
+// immediately, but CUDA sizes a thread's local-memory frame statically from
+// the kernel's declared locals regardless of whether that thread reaches
+// them -- and this kernel's MAX_CAND arrays come to roughly 106 KB per
+// thread (4096 * (8+4+1+1+8+4) bytes). Launching <<<nUnits, 32>>> therefore
+// reserved 32x more local memory than one block can ever use: at 157 units
+// that is ~530 MB of backing store, 31/32 of it untouched, evicting the
+// parts that ARE hot from L2. Launching <<<nUnits, 1>>> is semantically
+// identical (thread 0 was already doing all the work) and drops it to ~16 MB.
 //
 // Local scratch arrays are capped at MAX_CAND -- see that macro's comment.
 // Runs with nSamples=0 and finalFlush=true for flush() (offline/finite-
@@ -370,7 +388,8 @@ std::vector<GpuPeakEvent> GpuConvolutionEngine::processChunk(
     // derivation -- absIndex(idx) = streamSampleOffset - rightMargin_ + idx.
     long long chunkAbsBase = streamSampleOffset - rightMargin_;
 
-    nmsDecideKernel<<<nUnits_, 32, 0, stream>>>(
+    // One thread per block -- required, see nmsDecideKernel's comment.
+    nmsDecideKernel<<<nUnits_, 1, 0, stream>>>(
         d_dNew_, static_cast<int>( nSamples ), chunkAbsBase, nUnits_, minSeparationSamples_,
         finalizeMarginSamples_, /*finalFlush=*/false,
         d_dTail_, d_dTailCount_, d_dTailStartAbsIndex_, d_lastDecidedAbsIndex_, dTailCap_,
@@ -436,7 +455,8 @@ std::vector<GpuPeakEvent> GpuConvolutionEngine::flush( void *streamVoid )
 
     CUDA_CHECK( cudaMemsetAsync( d_detectionCount_, 0, sizeof(int), stream ) );
 
-    nmsDecideKernel<<<nUnits_, 32, 0, stream>>>(
+    // One thread per block -- required, see nmsDecideKernel's comment.
+    nmsDecideKernel<<<nUnits_, 1, 0, stream>>>(
         d_dNew_, /*nSamples=*/0, /*chunkAbsBase=*/0, nUnits_, minSeparationSamples_,
         finalizeMarginSamples_, /*finalFlush=*/true,
         d_dTail_, d_dTailCount_, d_dTailStartAbsIndex_, d_lastDecidedAbsIndex_, dTailCap_,

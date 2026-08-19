@@ -37,6 +37,16 @@ public:
     // sglx_fetch/the network -- see FilterGen/validate_all_units.py, which
     // summarizes this against fetchChunkMs to check the pipeline is keeping
     // up with real time).
+    //
+    // IGNORE CHUNK 0 when reading this log. It reliably measures ~200 ms
+    // against ~0.2 ms for every subsequent chunk, because the first launch
+    // of each kernel is what actually loads its module and reserves its
+    // local-memory backing store; the CUDA context itself is already up by
+    // then (the engine's constructor cudaMallocs). Confirmed not to be PTX
+    // JIT: embedding a native sm_80 cubin alongside the PTX leaves it
+    // unchanged. It is also harmless -- the server's ring absorbs it
+    // completely, with measured max backlog of 76 samples (2.5 ms) over a
+    // 30 s run. Treat any OTHER chunk over a millisecond as the real signal.
     ImecFetchThreadGPU( void *hSglx, const GpuFilterBank &filterBank,
                          const std::string &carChannelMapJsonPath,
                          bool applyHighpass, double highpassCutoffHz,

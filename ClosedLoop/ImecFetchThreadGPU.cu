@@ -16,6 +16,7 @@
 #include "SyncEdgeTracker.h"
 #include "GpuPreprocessor.h"
 #include "GpuConvolutionEngine.h"
+#include "StreamAccountant.h"
 
 namespace {
     const int kImecJs = 2;
@@ -168,6 +169,22 @@ void ImecFetchThreadGPU::fetchLoop()
     short *d_rawChunk = nullptr;
     CUDA_CHECK( cudaMalloc( &d_rawChunk, static_cast<size_t>( maxChunkSamples ) * nCarChans * sizeof(short) ) );
 
+    // Ring-buffer depth, in samples. sglx_fetch cannot serve a start index
+    // older than this: the server answers "Too late" and those samples are
+    // permanently gone. Measured at ~8.0 s on both streams of SpikeGLX
+    // v20251218 (binary-searched how far back FETCH still succeeds). The
+    // 0.75 factor keeps the resync target comfortably inside whatever the
+    // real depth is on a given build, instead of aiming at the very edge
+    // where it would immediately age out again.
+    const long long ringDepthSamples     = static_cast<long long>( 8.0 * sampleRate );
+    const long long resyncBackoffSamples = static_cast<long long>( 0.75 * ringDepthSamples );
+
+    StreamAccountant acct;
+    // Backlog costs an extra round-trip to ask for, so sample it
+    // periodically rather than every chunk -- this loop runs at several
+    // hundred Hz (see the latency logs referenced in the commit history).
+    const long long backlogPollEveryNChunks = 200;
+
     t_ull fromCt = sglx_getStreamSampleCount( hSglx_, kImecJs, kImecIp );
 
     while( !stopFlag_.load() ) {
@@ -183,14 +200,62 @@ void ImecFetchThreadGPU::fetchLoop()
         t_ull headCt = sglx_fetch( io, hSglx_, fromCt );
 
         if( headCt == 0 ) {
+            // A failed fetch is NOT retryable from the same fromCt. The
+            // dominant cause is "Too late": fromCt has aged out of the
+            // server's ~8 s ring, and every future attempt at that same
+            // index fails identically while the stream keeps advancing.
+            // An earlier version of this loop slept and continue'd without
+            // touching fromCt, so the first time this thread fell 8 s
+            // behind it wedged permanently -- stderr forever, zero
+            // detections for the rest of the session, and nothing in the
+            // output saying so. Jump forward into a live part of the ring
+            // instead, and count what was skipped as lost rather than
+            // letting the record imply the stream was contiguous.
             std::cerr << "ImecFetchThreadGPU: sglx_fetch error: " << sglx_getError( hSglx_ ) << "\n";
+
+            t_ull serverHead = sglx_getStreamSampleCount( hSglx_, kImecJs, kImecIp );
+            if( serverHead == 0 ) {
+                // Cannot even ask where the stream is -- server down or run
+                // stopped. Back off and retry; nothing to record, since we
+                // have no idea where we would be resyncing TO.
+                std::this_thread::sleep_for( std::chrono::milliseconds( fetchChunkMs_ ) );
+                continue;
+            }
+
+            t_ull resumeAt = ( static_cast<long long>( serverHead ) > resyncBackoffSamples )
+                             ? serverHead - static_cast<t_ull>( resyncBackoffSamples )
+                             : 0;
+
+            if( resumeAt > fromCt ) {
+                std::cerr << "ImecFetchThreadGPU: resyncing " << fromCt << " -> " << resumeAt
+                          << " (" << (resumeAt - fromCt) << " samples lost)\n";
+                acct.noteResync( static_cast<long long>( resumeAt ) );
+                fromCt = resumeAt;
+            }
+            else {
+                // Failed with fromCt still inside the ring -- a transient
+                // (network hiccup, run paused). Leave fromCt alone so no
+                // data is skipped, and just retry.
+                ++acct.nFetchErrors;
+            }
+
             std::this_thread::sleep_for( std::chrono::milliseconds( fetchChunkMs_ ) );
             continue;
         }
 
         long long tpts = static_cast<long long>( io.data.size() ) / nFetchChans;
         if( tpts <= 0 ) {
+            // No new samples yet. Sleep a fraction of a chunk period rather
+            // than spinning: with no pause at all this loop fires a fresh
+            // TCP round-trip immediately, which on past runs drove it to
+            // several hundred fetches/second for a median of 60 samples
+            // each -- CPU and server time spent asking for data that
+            // physically is not there yet. A full chunk period would be too
+            // coarse (it would add up to fetchChunkMs of avoidable latency
+            // to a spike arriving just after we looked), so wait a quarter.
             fromCt = headCt;
+            std::this_thread::sleep_for(
+                std::chrono::microseconds( std::max( 250, fetchChunkMs_ * 250 ) ) );
             continue;
         }
         if( tpts > maxChunkSamples ) {
@@ -199,6 +264,23 @@ void ImecFetchThreadGPU::fetchLoop()
             // preallocated buffers, remaining data is picked up next
             // iteration since fromCt only advances by what was consumed.
             tpts = maxChunkSamples;
+        }
+
+        // Recorded BEFORE processing and with the post-clamp tpts, so the
+        // accounting reflects what actually reaches the pipeline. A nonzero
+        // gap means the server could not serve our requested start and
+        // silently began us later; this is the only place that fact is
+        // observable at all.
+        long long gap = acct.noteFetch( static_cast<long long>( headCt ), tpts );
+        if( gap > 0 ) {
+            std::cerr << "ImecFetchThreadGPU: stream gap of " << gap
+                      << " samples before headCt=" << headCt << "\n";
+        }
+
+        if( chunkIndex % backlogPollEveryNChunks == 0 ) {
+            t_ull serverHead = sglx_getStreamSampleCount( hSglx_, kImecJs, kImecIp );
+            if( serverHead != 0 )
+                acct.noteBacklog( static_cast<long long>( serverHead ) );
         }
 
         for( long long t = 0; t < tpts; ++t ) {
@@ -222,10 +304,16 @@ void ImecFetchThreadGPU::fetchLoop()
             static_cast<long long>( headCt ), nullptr );
         auto t1 = std::chrono::steady_clock::now();
 
+        // Neither file is flushed per chunk any more. At the several-
+        // hundred-chunks-per-second this loop really runs at, a flush per
+        // chunk is a syscall in the sample-critical path (and on this
+        // machine a OneDrive-synced write). Both are flushed once at
+        // shutdown below, and ofstream's own buffering bounds what is at
+        // risk meanwhile -- mainAllUnits.cpp's Ctrl+C path goes through
+        // stop()/join(), so it reaches that shutdown flush normally.
         if( latencyLogFile.is_open() ) {
             double latencyMs = std::chrono::duration<double, std::milli>( t1 - t0 ).count();
             latencyLogFile << chunkIndex << "," << tpts << "," << latencyMs << "\n";
-            latencyLogFile.flush();
         }
         ++chunkIndex;
 
@@ -235,10 +323,26 @@ void ImecFetchThreadGPU::fetchLoop()
                 spikeTimesFile << unitId << "," << detections[d].sampleIndex
                                 << "," << detections[d].score << "\n";
             }
-            spikeTimesFile.flush();
         }
 
         fromCt = headCt + static_cast<t_ull>( tpts );
+    }
+
+    // Final backlog reading, so a run that ended while behind says so.
+    {
+        t_ull serverHead = sglx_getStreamSampleCount( hSglx_, kImecJs, kImecIp );
+        if( serverHead != 0 )
+            acct.noteBacklog( static_cast<long long>( serverHead ) );
+    }
+
+    spikeTimesFile.flush();
+    if( latencyLogFile.is_open() )
+        latencyLogFile.flush();
+
+    std::cout << "\n" << acct.summary( "IMEC", sampleRate );
+    if( !acct.balanced() || acct.nDropped > 0 ) {
+        std::cerr << "ImecFetchThreadGPU: WARNING -- this run did not process every "
+                     "sample the server produced (see the summary above).\n";
     }
 
     cudaFree( d_rawChunk );
