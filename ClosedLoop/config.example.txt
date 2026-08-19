@@ -94,3 +94,39 @@ spikeTimesPath=D:/test_newsorter/spikeTimes.txt
 # to skip writing this file (events still reach DecisionThread either way).
 syllableTimesPath=D:/test_newsorter/syllableTimes.txt
 decisionLogPath=D:/test_newsorter/decisions.log
+
+# ==========================================================================
+# ClosedLoopAllUnits.exe (all-units GPU detection) -- see README.md's
+# "All-units GPU detection" section. That executable reads a SUBSET of the
+# keys above plus the three below; everything in the Calibration, NI, and
+# Decision sections is ignored by it (it is detection-only).
+#
+# Keys it does read from above: sglxHost, sglxPort, filterDir,
+# templateLength, carChannelMapJson, applyHighpass, highpassCutoffHz,
+# imecSyncBit, fetchChunkMs, spikeTimesPath.
+#
+# NOTE filterDir means something different here: not the single-target
+# channels_/filter_/threshold_<id>.bin trio, but the four flat packed files
+# FilterGen/calibrate_all_units.py writes (unit_ids/channels/filters/
+# thresholds.bin). And spikeTimesPath gets `unit_id,sample_index,score` CSV
+# rows rather than one sample index per line.
+# ==========================================================================
+
+# Channels per unit in the packed filter bank. MUST match what
+# calibrate_all_units.py was run with (--n-channels) -- the packed files are
+# flat arrays with no self-description, so a mismatch silently
+# misinterprets the byte layout rather than failing.
+filterNChannels=5
+
+# Optional per-chunk GPU timing log: chunk_index,n_samples,latency_ms.
+# Leave blank to disable. IGNORE CHUNK 0 -- it reads ~200ms against ~0.2ms
+# for every chunk after it, because the first launch of each kernel loads
+# its module and reserves its local memory. Not a stall; the server ring
+# absorbs it. Any OTHER chunk over a millisecond is worth looking at.
+latencyLogPath=D:/test_newsorter/latency_all_units.csv
+
+# 0 (default) runs until Ctrl+C. A finite value stops cleanly on its own,
+# for unattended/scripted runs, without needing something to deliver Ctrl+C
+# at the right moment -- either way shutdown goes through stop()/join(), so
+# the last chunks and the sample-accounting summary are not lost.
+runDurationSec=0

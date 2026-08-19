@@ -220,6 +220,103 @@ follows). This means:
 - Close/destroy all handles sequentially again at shutdown, after joining
   every thread.
 
+## All-units GPU detection
+
+A second, separate executable, `ClosedLoopAllUnits.exe` (`mainAllUnits.cpp`),
+detects **every** Kilosort unit in a session simultaneously on the GPU,
+rather than one hand-picked target on the CPU. Several source comments point
+at this section; this is it.
+
+It is deliberately a separate binary and not a mode switch inside
+`ClosedLoop.exe`. The single-target path is the validated production one and
+stays untouched by work on this.
+
+**It is detection-only.** No `NiFetchThread`, no `DecisionThread`, no digital
+output, no calibration subprocess. Detections go to `spikeTimesPath` as
+`unit_id,sample_index,score` rows, where `unit_id` is the real Kilosort
+cluster id (via `GpuFilterBank::hostUnitIds`), not an internal array index.
+
+### Pipeline
+
+1. `FilterGen/calibrate_all_units.py`, run offline ahead of time, fits an
+   LCMV filter and sweeps a threshold for every qualifying unit and packs
+   them into four flat, fixed-stride files (`unit_ids.bin`, `channels.bin`,
+   `filters.bin`, `thresholds.bin`) plus `summary.csv`. It reuses
+   `generate_filter.py`/`threshold_sweep_real.py`'s functions directly --
+   this repo has twice lost recall to a second, drifted reimplementation of
+   that math. There is also a C++/GPU equivalent, `CalibrateAllUnits.exe`
+   (`mainCalibrateAllUnits.cu`), for the same job without Python.
+2. `GpuFilterBank::load()` uploads all four arrays once at startup. Every
+   unit shares one `nChannelsPerUnit` and one `templateLength`; that fixed
+   stride is what lets the kernels index without a per-unit lookup.
+3. `ImecFetchThreadGPU` owns one handle (same one-handle-one-thread rule as
+   everything else here), fetches the full CAR group + SY channel, and hands
+   each chunk to `GpuPreprocessor` (highpass + CAR) then
+   `GpuConvolutionEngine` (batched matched filter + windowed NMS), which
+   score every unit in two kernel launches per chunk.
+
+`GpuConvolutionEngine` is a *port* of `ConvolutionEngine.cpp`, not a
+re-derivation, for the reason that file states about itself. Its one
+deliberate difference is that the device history buffer starts as a fixed
+`templateLength-1` zeros rather than replicating the CPU's variable-length
+ramp-up -- a bounded ~2 ms startup transient, never recurring.
+
+### Sample accounting -- read the shutdown summary
+
+The fetch loop tracks every sample the server produced and prints a summary
+at shutdown asserting `span == processed + dropped`. Check it. A run that
+lost data says so there and nowhere else.
+
+Two ways samples go missing, both counted:
+
+- **Gap.** `sglx_fetch` returns `headCt`, the index of the first sample it
+  actually gives you, which is not necessarily what you asked for. If your
+  request has aged out of the ring, the server silently starts you later.
+- **Resync.** If the request is too old to serve at all, `sglx_fetch` fails
+  ("Too late") and the loop must jump forward into a live part of the ring.
+
+**The server ring is only ~8.0 s deep** on both streams (SpikeGLX
+v20251218, measured). Falling that far behind is unrecoverable by
+construction, so watch `max backlog` in the summary long before it gets
+near. In practice there is enormous headroom: a 157-unit run against the
+live server processed 30.05 s of stream in a 30 s window with zero drops and
+a max backlog of 76 samples (2.5 ms), at ~10% GPU duty cycle.
+
+`latencyLogPath` gives per-chunk GPU-pipeline timing.
+**Ignore chunk 0** -- it reliably reads ~200 ms against ~0.2 ms for
+everything after it, because the first launch of each kernel is what loads
+its module and reserves its local memory. It is not PTX JIT (a native cubin
+does not change it) and the ring absorbs it completely. Any *other* chunk
+over a millisecond is real.
+
+### Validating a run
+
+`FilterGen/validate_all_units.py` scores detections against Kilosort ground
+truth and summarizes the latency log.
+
+**It must go through `FilterGen/stream_alignment.py`, and you should read
+that module's docstring before touching any of this.** A replayed stream's
+sample counter is not phase-locked to the replayed file's read position, and
+the offset slips *within* a single pass. Assuming otherwise once produced a
+result that looked exactly like a broken detector for sparse units and was
+entirely a broken comparison -- see `live_tracking_bug_report.md`. If live
+metrics ever again show recall correlating with firing rate but not with
+amplitude or isolation, that is the signature of chance-level matching:
+check alignment first, it is much cheaper to rule out than a pipeline bug.
+
+### Testing without the rig
+
+`FilterGen/make_sim_session.py` generates a replayable synthetic session
+(384 ch + SY, ~30 min, ~160 units) with exactly known spike times, syllable
+onsets, and **drift trajectories**. Point SpikeGLX's IMEC simulation source
+at its `.bin` to exercise the live path, or feed the `.bin` and its
+`sim_ks/` directly to `calibrate_all_units.py` for the offline path -- where,
+having no stream, there is no alignment problem at all.
+
+Syllable codes ride on the IMEC SY channel's bits 0-2 rather than the NI
+digital word, because the NI stream cannot be simulated on this setup. See
+that script's docstring for why that is also the better test article.
+
 ## Building
 
 **`SglxApi.dll` must sit next to the built `.exe`.** The copy in the repo
