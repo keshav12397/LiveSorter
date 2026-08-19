@@ -108,6 +108,68 @@ TEMPLATE_OFFSET = 20       # samples from waveform start to its negative peak
 # Unit population
 # ==========================================================================
 
+def draw_amplitude(rng):
+    """Per-unit peak amplitude in ADC counts.
+
+    CALIBRATED AGAINST THE REAL RECORDING, not chosen for plausibility. What
+    matters is not any single unit's amplitude but the statistics of the
+    *summed* multi-unit signal after highpass+CAR, because that sum is the
+    background every filter has to reject. Measured on 900k samples of the
+    real recording, and on this generator's output:
+
+                        noise (MAD)   |x| p99.9   SNR    max|x|
+        real                 6.37         34.7     5.4     1934
+        this generator, before:
+                            13.68        177.6    12.0      483
+
+    An earlier version drew 18..320, which is roughly 6x too loud. Real data
+    is a quiet background with rare large spikes; that version produced a
+    dense carpet of large deflections in which 0.1% of ALL samples exceeded
+    177, so every unit's filter crossed threshold continuously on other
+    units' activity. The visible symptom was baseline precision of ~3% and
+    median f1 0.05 across 160 units, against 0.43 on the real session at the
+    same unit density (22.7 vs 23.1 units/100 um) and the same population
+    rate (1625 vs 1765 Hz). Density and rate were both ruled out by direct
+    measurement before amplitude was found; the scale of the summed signal
+    was the whole difference.
+
+    The 6..90 body reproduces the real MAD/p99.9/SNR closely (6.90 / 39.2 /
+    5.7). The rare loud tail exists because the real recording's max|x| is
+    ~300x its noise MAD -- a handful of exceptional units that a body-only
+    distribution cannot produce, and that anchor the top of the achievable
+    f1 range.
+    """
+    if rng.random() < 0.05:
+        return float(np.exp(rng.uniform(np.log(90.0), np.log(400.0))))
+    return float(np.exp(rng.uniform(np.log(6.0), np.log(90.0))))
+
+
+def draw_rate(rng):
+    """Per-unit firing rate, matched to the real session's distribution
+    rather than drawn log-uniformly.
+
+    The real 163-cluster session on this probe has per-unit rate percentiles
+    p10 0.25, p25 0.55, p50 1.42, p75 6.87, p90 21.0, max 174 Hz -- a
+    population overwhelmingly made of very sparse units with a small, very
+    busy tail. A log-uniform draw over the same min/max instead puts the
+    median at ~4.4 Hz and caps the tail, which sounds like a minor difference
+    and is not: it means the total population rate arrives as ~160 units all
+    moderately active and spatially interleaved, instead of a few loud units
+    plus a lot of quiet ones. Every unit then collides with every other, and
+    the collisions are with spatially overlapping neighbours rather than with
+    a handful of identifiable loud units that the interferer nulling can
+    actually be pointed at.
+
+    Lognormal reproduces the shape closely; the parameters below were fit to
+    the percentiles above. The tail is drawn separately because a lognormal
+    wide enough to reach 174 Hz would also push the median far too high.
+    """
+    if rng.random() < 0.08:
+        # The busy tail: ~8% of units carry most of the population rate.
+        return float(np.exp(rng.uniform(np.log(25.0), np.log(175.0))))
+    return float(np.clip(rng.lognormal(mean=np.log(1.5), sigma=1.60), 0.2, 25.0))
+
+
 def build_units(rng, n_units, n_drifting, group_yc, duration_s):
     """Draw a population of units with position, amplitude, rate, and (for
     a subset) a drift trajectory.
@@ -131,19 +193,43 @@ def build_units(rng, n_units, n_drifting, group_yc, duration_s):
             # has somewhere to drift to without falling off the array.
             "y0": rng.uniform(y_lo + 30.0, y_hi - 30.0),
             "_duration_s": float(duration_s),
-            # ADC counts. The real session's Kilosort amplitudes span roughly
-            # an order of magnitude; this spans a bit more, so the low end is
-            # genuinely marginal against a noise sigma of ~10.
-            "amplitude": float(np.exp(rng.uniform(np.log(18.0), np.log(320.0)))),
-            # Hz. The real session has units from ~0.3 Hz to ~175 Hz.
-            "rate_hz": float(np.exp(rng.uniform(np.log(0.3), np.log(40.0)))),
-            # Spatial extent of the unit's footprint, in microns. Larger =
-            # spread over more channels = easier to pick channels for.
-            "sigma_um": float(rng.uniform(18.0, 42.0)),
-            # Slight per-unit waveform shape variation so every template is
-            # not literally the same curve at a different scale.
-            "rebound_frac": float(rng.uniform(0.20, 0.45)),
-            "width_samples": float(rng.uniform(2.2, 4.2)),
+            # ADC counts -- see draw_amplitude() for why the scale matters.
+            "amplitude": draw_amplitude(rng),
+            # Hz -- see draw_rate() for why this is not a plain log-uniform.
+            "rate_hz": draw_rate(rng),
+            # Spatial extent of the unit's footprint, in microns -- measured
+            # off this project's real Kilosort templates, not guessed.
+            #
+            # THIS IS THE PARAMETER THAT DECIDES WHETHER THE SESSION IS
+            # SEPARABLE AT ALL, and it was the last of three defects found
+            # here. Fitting a Gaussian to the spatial decay of each real
+            # template about its peak channel gives sigma p10 12, p50 14,
+            # p90 22 um -- i.e. 4 channels above 30% of peak (p10 2, p90 8).
+            # An earlier version used 18..42 um, giving 14 channels above
+            # 30%: 2.2x the sigma and 3.5x the channel coverage.
+            #
+            # At this probe's real unit density (~23 units per 100 um) that
+            # is the difference between a population where a 5-channel filter
+            # captures one unit almost completely and its neighbours are
+            # largely disjoint, and one where every unit's footprint overlaps
+            # every neighbour's and no 5-channel filter can isolate anything.
+            # Neither unit density, population rate, waveform diversity, nor
+            # amplitude scale explained the resulting precision collapse --
+            # all four were measured against the real recording and matched.
+            # This did not.
+            "sigma_um": float(np.exp(rng.uniform(np.log(10.0), np.log(26.0)))),
+            # Waveform shape. Six parameters, spanning enough shape space that
+            # units are separable from each other -- see make_temporal_waveform,
+            # where getting this too narrow was a real defect with real
+            # consequences.
+            "width_samples": float(rng.uniform(1.8, 5.5)),
+            "rebound_frac": float(rng.uniform(0.10, 1.30)),
+            "rebound_delay": float(rng.uniform(4.0, 20.0)),
+            "rebound_width": float(rng.uniform(2.5, 11.0)),
+            "prepeak_frac": float(rng.uniform(0.0, 0.35)),
+            # ~15% of units record positive-going at their peak channel, as a
+            # minority of real ones do.
+            "polarity": 1.0 if rng.random() > 0.15 else -1.0,
         })
 
     # --- drift ------------------------------------------------------------
@@ -225,15 +311,45 @@ def draw_spike_times(rng, rate_hz, duration_s, fs, refractory_s=0.0015):
     return np.sort((t * fs).astype(np.int64))
 
 
-def make_temporal_waveform(width_samples, rebound_frac):
-    """Biphasic spike shape: a sharp negative-going main phase followed by a
-    broader positive rebound. Same construction as make_synthetic_test.py's
-    gauss_bump pair, parameterized so units differ from one another."""
+def make_temporal_waveform(width_samples, rebound_frac, rebound_delay,
+                            rebound_width, prepeak_frac, polarity):
+    """Extracellular spike shape, parameterized widely enough that different
+    units are actually distinguishable from one another.
+
+    THIS IS THE POINT OF THE PARAMETERIZATION, not incidental realism.
+    An earlier version varied only `width_samples` and `rebound_frac`, which
+    produced templates cross-correlating at median 0.978 (min 0.806) across
+    the whole parameter range -- i.e. every unit looked like every other one.
+    An LCMV filter fit to unit A then responds almost as strongly to unit B,
+    and since the fit nulls only ~5 explicitly chosen interferers, the other
+    ~150 units leak straight through. On a 160-unit session that drove
+    baseline precision to ~3% and median f1 to 0.05, which reads as a broken
+    detector and is entirely a property of the test data.
+
+    Real Kilosort peak-channel templates from this project's own recording
+    cross-correlate at median 0.821 with a minimum of 0.000. The five
+    parameters here (main-phase width, rebound size, rebound delay, rebound
+    width, a small pre-peak hyperpolarization, and polarity) span enough
+    shape space to land in that range -- see the self-check at the bottom of
+    this module, which asserts it rather than trusting it.
+
+    Polarity is included because a minority of real units genuinely record
+    positive-going at their peak channel, and a population that is uniformly
+    negative-going is easier to separate than a real one.
+    """
     x = np.arange(TEMPLATE_LENGTH, dtype=np.float64)
+
     main = -np.exp(-0.5 * ((x - TEMPLATE_OFFSET) / width_samples) ** 2)
     rebound = rebound_frac * np.exp(
-        -0.5 * ((x - (TEMPLATE_OFFSET + 3.2 * width_samples)) / (1.8 * width_samples)) ** 2)
-    return (main + rebound).astype(np.float32)
+        -0.5 * ((x - (TEMPLATE_OFFSET + rebound_delay)) / rebound_width) ** 2)
+    # Small depolarizing shoulder before the trough -- present in real
+    # extracellular waveforms and a cheap source of shape asymmetry, which is
+    # what a symmetric-Gaussian-only model lacks.
+    prepeak = prepeak_frac * np.exp(
+        -0.5 * ((x - (TEMPLATE_OFFSET - 1.8 * width_samples)) / (0.9 * width_samples)) ** 2)
+
+    wf = polarity * (main + rebound + prepeak)
+    return (wf / np.max(np.abs(wf))).astype(np.float32)
 
 
 # ==========================================================================
@@ -295,11 +411,11 @@ def main():
     ap.add_argument("--sample-rate", type=float, default=30000.0)
     ap.add_argument("--n-units", type=int, default=160)
     ap.add_argument("--n-drifting", type=int, default=48)
-    ap.add_argument("--noise-sigma", type=float, default=10.0,
+    ap.add_argument("--noise-sigma", type=float, default=6.5,
                     help="Per-channel white noise sigma in ADC counts. The "
-                         "default matches the ~9.9 measured on the real "
-                         "simulated probe stream.")
-    ap.add_argument("--corr-noise-sigma", type=float, default=6.0,
+                         "default is calibrated so the post-CAR noise MAD "
+                         "matches the real recording's 6.37 -- see draw_amplitude().")
+    ap.add_argument("--corr-noise-sigma", type=float, default=4.0,
                     help="Amplitude of a shared noise component added across "
                          "the whole group. This is what CAR exists to remove; "
                          "with it at zero, CAR would be untested.")
@@ -363,7 +479,28 @@ def main():
 
     # --- precompute per-unit temporal waveforms and channel neighbourhoods --
     for u in units:
-        u["_wave"] = make_temporal_waveform(u["width_samples"], u["rebound_frac"])
+        u["_wave"] = make_temporal_waveform(
+            u["width_samples"], u["rebound_frac"], u["rebound_delay"],
+            u["rebound_width"], u["prepeak_frac"], u["polarity"])
+
+    # Assert the population is actually separable before spending several
+    # minutes writing tens of GB of it. A population whose templates all look
+    # alike produces a session where the detector's precision collapses for
+    # reasons that have nothing to do with the detector -- which happened, and
+    # cost a full generate-calibrate-diagnose cycle to find. Checking it here
+    # is seconds; discovering it downstream is not.
+    Wn = np.array([u["_wave"] / np.linalg.norm(u["_wave"]) for u in units])
+    C = np.abs(Wn @ Wn.T)
+    iu = np.triu_indices(len(units), 1)
+    med_corr = float(np.median(C[iu]))
+    print(f"  waveform cross-correlation: median {med_corr:.3f}, "
+          f"max {C[iu].max():.3f}  (real Kilosort templates: median 0.821)")
+    if med_corr > 0.90:
+        sys.exit(
+            f"Refusing to generate: unit waveforms cross-correlate at median "
+            f"{med_corr:.3f}, so units are barely distinguishable from each "
+            f"other and every filter will respond to every unit. Widen the "
+            f"shape parameter ranges in build_units().")
 
     # --- write the .bin ---------------------------------------------------
     bin_path = os.path.join(args.out_dir, f"{args.run_name}.imec0.ap.bin")
