@@ -140,21 +140,16 @@ void ImecFetchThreadGPU::fetchLoop()
     GpuPreprocessor preprocessor( nCarChans, highpassCutoffHz_, sampleRate, applyHighpass_, applyCar );
     // minSeparationSamples: templateLength/2, same convention every other
     // caller uses (Calibration.cpp's single-target CPU path, OfflineScorer.cu's
-    // batch calibration scoring, every NMS equivalence test) -- omitting this
-    // here left it at the constructor's default of 0, meaning the windowed-NMS
-    // decision kernel enforced NO minimum separation between accepted peaks at
-    // all. High-SNR/high-firing units' true spike peaks still dominated their
-    // local neighborhood regardless, but for lower-SNR or sparsely-firing
-    // units this let ordinary near-threshold noise fluctuations register as
-    // separate, unsuppressed detections firing at roughly the calibrated rate
-    // but at essentially unrelated times to the real spikes -- found via a
-    // live all-units run where several units' detection COUNT matched their
-    // Kilosort ground-truth count closely while almost none of the individual
-    // timestamps did, then confirmed by reproducing the SAME filter/threshold
-    // through the already-validated OfflineScorer.cu (which always passes
-    // this correctly) and seeing it score exactly as well as calibration
-    // predicted -- isolating the bug to this constructor call, not the shared
-    // GPU kernel, the data, or the fit.
+    // batch calibration scoring, every NMS equivalence test). Passed
+    // explicitly for legibility, not to fix anything: GpuConvolutionEngine's
+    // constructor already maps a non-positive value to templateLength/2, so
+    // the earlier omission here was a no-op, not the "NO minimum separation
+    // enforced" bug an earlier version of this comment claimed. That claim
+    // came from misreading a live run in which NO unit tracked ground truth
+    // -- the run's detections were being compared against a misaligned
+    // ground truth (FilterGen/stream_alignment.py's docstring has the whole
+    // story). Realigned, that same run's per-unit F1 matches calibration's
+    // offline prediction at r=0.97.
     const long long minSep = filterBank_.templateLength / 2;
     GpuConvolutionEngine engine( filterBank_, nCarChans, maxChunkSamples, minSep );
     SyncEdgeTracker syncTracker( sampleRate );
