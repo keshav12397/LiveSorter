@@ -1,8 +1,10 @@
 #include "DecisionThread.h"
 
 #include <iostream>
+#include <algorithm>
 
 #include "SglxCppClient.h"
+#include "EventPublisher.h"
 
 namespace {
     // sglx_ni_DO_set's `bits` parameter maps bits to the lines named in its
@@ -18,14 +20,29 @@ DecisionThread::DecisionThread( void *hSglx, ThreadSafeQueue<SpikeEvent> &spikeQ
                                  ThreadSafeQueue<SyllableEvent> &syllableQueue,
                                  double windowStartS, double windowEndS, int spikeCountThreshold,
                                  const std::string &doLine, int doPulseMs,
-                                 const std::string &decisionLogPath )
+                                 const std::string &decisionLogPath,
+                                 const std::vector<int> &decisionUnitIds,
+                                 const std::string &decisionCsvPath,
+                                 EventPublisher *publisher )
     :   hSglx_( hSglx ), spikeQueue_( spikeQueue ), syllableQueue_( syllableQueue ),
         windowStartS_( windowStartS ), windowEndS_( windowEndS ),
         spikeCountThreshold_( spikeCountThreshold ), doLine_( doLine ), doPulseMs_( doPulseMs ),
+        decisionUnitIds_( decisionUnitIds ), countsAllUnits_( decisionUnitIds.empty() ),
+        publisher_( publisher ),
         lineHigh_( false ), stopFlag_( false )
 {
+    // Sorted once here so onSpikeEvent can binary-search instead of doing a
+    // linear scan per spike -- that call runs on every one of 157 units.
+    std::sort( decisionUnitIds_.begin(), decisionUnitIds_.end() );
+
     if( !decisionLogPath.empty() )
         decisionLog_.open( decisionLogPath.c_str(), std::ios::app );
+
+    if( !decisionCsvPath.empty() ) {
+        decisionCsv_.open( decisionCsvPath.c_str(), std::ios::app );
+        if( decisionCsv_.is_open() )
+            decisionCsv_ << "syllable_sample_index,code,triggered,spike_count\n";
+    }
 }
 
 
@@ -70,6 +87,15 @@ void DecisionThread::onSyllableEvent( const SyllableEvent &syl )
 
 void DecisionThread::onSpikeEvent( const SpikeEvent &spk )
 {
+    // Unit gating. With one target there is nothing to gate (and unitId is
+    // -1), so an empty list keeps the original "any spike counts" rule; with
+    // a whole session's units on the queue, a decision driven by "any of 157
+    // units fired" is not a decision about anything.
+    if( !countsAllUnits_
+        && !std::binary_search( decisionUnitIds_.begin(), decisionUnitIds_.end(), spk.unitId ) ) {
+        return;
+    }
+
     for( size_t i = 0; i < pending_.size(); ++i ) {
 
         PendingSyllable &p = pending_[i];
@@ -122,7 +148,29 @@ void DecisionThread::pruneExpired()
             decisionLog_.flush();
         }
 
+        closeTrial( p );
         pending_.pop_front();
+    }
+}
+
+
+// A trial is only ever closed by pruneExpired(), which is FIFO by arrival,
+// so these rows and records come out in trial order.
+void DecisionThread::closeTrial( const PendingSyllable &p )
+{
+    if( decisionCsv_.is_open() ) {
+        decisionCsv_ << p.event.sampleIndex << "," << p.event.code << ","
+                     << ( p.triggered ? 1 : 0 ) << "," << p.count << "\n";
+        decisionCsv_.flush();
+    }
+
+    if( publisher_ ) {
+        publisher_->publish( livewire::makeRecord(
+            livewire::kWireTrial, livewire::kStreamNi,
+            p.event.code, p.event.sampleIndex,
+            static_cast<float>( p.count ),
+            static_cast<float>( p.event.timeRelSyncS ),
+            p.triggered ? 1 : 0 ) );
     }
 }
 
@@ -134,6 +182,11 @@ void DecisionThread::raiseLine()
 
     lineHigh_ = true;
     lineHighUntil_ = std::chrono::steady_clock::now() + std::chrono::milliseconds( doPulseMs_ );
+
+    if( publisher_ ) {
+        publisher_->publish( livewire::makeRecord(
+            livewire::kWireLine, livewire::kStreamNone, 1, 0, 0.0f, 0.0f ) );
+    }
 }
 
 
@@ -143,5 +196,10 @@ void DecisionThread::lowerLineIfDue()
         if( !sglx_ni_DO_set( hSglx_, doLine_, kLineLowBits ) )
             std::cerr << "DecisionThread: sglx_ni_DO_set (lower) failed: " << sglx_getError( hSglx_ ) << "\n";
         lineHigh_ = false;
+
+        if( publisher_ ) {
+            publisher_->publish( livewire::makeRecord(
+                livewire::kWireLine, livewire::kStreamNone, 0, 0, 0.0f, 0.0f ) );
+        }
     }
 }

@@ -7,6 +7,8 @@
 
 #include "SglxCppClient.h"
 #include "DigitalWordUtils.h"
+#include "SyllableDecoder.h"
+#include "EventPublisher.h"
 
 namespace {
     const int kNiJs = 0;  // NI stream selector, per SglxApi.h
@@ -17,11 +19,12 @@ namespace {
 NiFetchThread::NiFetchThread( void *hSglx, int niSyncBit, const std::vector<int> &syllableLines,
                                int debounceSamples, int fetchChunkMs,
                                ThreadSafeQueue<SyllableEvent> &syllableQueue,
-                               const std::string &syllableTimesPath )
+                               const std::string &syllableTimesPath,
+                               EventPublisher *publisher )
     :   hSglx_( hSglx ), syncBit_( niSyncBit ), syllableLines_( syllableLines ),
         debounceSamples_( debounceSamples ), fetchChunkMs_( fetchChunkMs ),
         syllableQueue_( syllableQueue ), syllableTimesPath_( syllableTimesPath ),
-        stopFlag_( false )
+        publisher_( publisher ), stopFlag_( false )
 {}
 
 
@@ -68,11 +71,11 @@ void NiFetchThread::fetchLoop()
 
     SyncEdgeTracker syncTracker( sampleRate );
 
-    // Debounce state.
-    int       candidateCode      = 0;
-    long long candidateCount     = 0;
-    long long candidateStartIdx  = 0;
-    int       lastEmittedCode    = 0;
+    // The debounce state machine used to live inline here; it now lives in
+    // SyllableDecoder.h so the IMEC-SY test path (ImecFetchThreadGPU with
+    // syllableSource=imecSy) runs this exact decoder rather than a second
+    // copy of it. Pure extraction, no behaviour change -- see that header.
+    SyllableDecoder decoder( fieldStartBit, fieldWidth, debounceSamples_ );
 
     t_ull fromCt = sglx_getStreamSampleCount( hSglx_, kNiJs, kNiIp );
 
@@ -107,35 +110,27 @@ void NiFetchThread::fetchLoop()
 
             syncTracker.update( extractBit( w, syncBit_ ), idx );
 
-            int code = extractField( w, fieldStartBit, fieldWidth );
+            int       code     = 0;
+            long long onsetIdx = 0;
 
-            if( code == candidateCode ) {
-                ++candidateCount;
-            }
-            else {
-                candidateCode     = code;
-                candidateCount    = 1;
-                candidateStartIdx = idx;
-            }
+            if( decoder.update( w, idx, code, onsetIdx ) && syncTracker.hasEdge() ) {
+                SyllableEvent ev;
+                ev.code         = code;
+                ev.sampleIndex  = onsetIdx;
+                ev.timeRelSyncS = syncTracker.secondsSinceLastEdge( onsetIdx );
+                syllableQueue_.push( ev );
 
-            if( candidateCount == debounceSamples_ && candidateCode != lastEmittedCode ) {
-
-                if( candidateCode != 0 && syncTracker.hasEdge() ) {
-                    SyllableEvent ev;
-                    ev.code         = candidateCode;
-                    ev.sampleIndex  = candidateStartIdx;
-                    ev.timeRelSyncS = syncTracker.secondsSinceLastEdge( candidateStartIdx );
-                    syllableQueue_.push( ev );
-
-                    if( syllableTimesFile.is_open() ) {
-                        syllableTimesFile << ev.code << "," << ev.sampleIndex << "\n";
-                        syllableTimesFile.flush();
-                    }
+                if( syllableTimesFile.is_open() ) {
+                    syllableTimesFile << ev.code << "," << ev.sampleIndex << "\n";
+                    syllableTimesFile.flush();
                 }
-                // Re-arm regardless of whether we emitted (code==0 "rest"
-                // stabilizing also updates lastEmittedCode, so a repeated
-                // nonzero code after a rest period is treated as new).
-                lastEmittedCode = candidateCode;
+
+                if( publisher_ ) {
+                    publisher_->publish( livewire::makeRecord(
+                        livewire::kWireSyllable, livewire::kStreamNi,
+                        ev.code, ev.sampleIndex, 0.0f,
+                        static_cast<float>( ev.timeRelSyncS ) ) );
+                }
             }
         }
 
