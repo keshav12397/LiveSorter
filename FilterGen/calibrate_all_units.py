@@ -128,7 +128,7 @@ def _fit_one_unit(target_id, spike_count):
     row = {"unit_id": target_id, "n_channels": "", "sel_channels": "",
            "threshold": "", "recall": "", "precision": "", "f1": "",
            "fp_rate_hz": "", "n_train_spikes": "", "n_test_spikes": "",
-           "status": "failed"}
+           "detection_lag": "", "status": "failed"}
     packed = None
     # One RNG per unit (seeded off unit id, not shared across units the way
     # the old serial version's single advancing rng was) -- makes each
@@ -145,11 +145,12 @@ def _fit_one_unit(target_id, spike_count):
         if not interferer_ids:
             raise ValueError("no interferers found nearby")
 
+        extras = {}
         f, sel, sel_channels, _, _ = tsr.fit_lcmv(
             data_train, spike_t_train, spike_cl_train, np_ch,
             target_id, interferer_ids, a["n_channels"],
             a["template_length"], a["template_offset"],
-            a["ridge"], a["max_spikes"], unit_rng)
+            a["ridge"], a["max_spikes"], unit_rng, extras=extras)
 
         if len(sel_channels) != a["n_channels"]:
             raise ValueError(f"only {len(sel_channels)} channels available, "
@@ -168,6 +169,21 @@ def _fit_one_unit(target_id, spike_count):
         window = a["template_length"] // 4
         min_sep = a["template_length"] // 2
         peak_idx, peak_scores = tsr.find_all_peaks(D_test, min_sep)
+
+        # The LCMV filter's response to its own target does not peak at the
+        # spike time -- see generate_filter.detection_lag for the derivation.
+        # The lag is a fixed property of (filter, template), it is unit-
+        # dependent, and on D:/sim_validate it reaches +18 samples against
+        # this +/-15 matching window. Left uncorrected, such a unit scores
+        # near-zero recall at every threshold while detecting perfectly, and
+        # -- worse, because this is the production calibration path -- the
+        # best-F1 search then deploys a threshold chosen from that garbage
+        # curve. Subtracting it here puts detections back on Kilosort's own
+        # sample convention, which is what the README says the reported
+        # index already means.
+        lag = gf.detection_lag(f, extras["target_template_sel"],
+                                a["template_offset"])
+        peak_idx = peak_idx - lag
 
         target_test_rel = target_test - split_t
         interferer_test_rel = {cid: t - split_t for cid, t in interferer_test.items()}
@@ -197,11 +213,12 @@ def _fit_one_unit(target_id, spike_count):
             "recall": recall[best_idx], "precision": precision[best_idx],
             "f1": f1[best_idx], "fp_rate_hz": fp_rate_hz[best_idx],
             "n_train_spikes": len(target_train), "n_test_spikes": len(target_test),
-            "status": "ok",
+            "detection_lag": lag, "status": "ok",
         })
         print(f"unit {target_id} ({spike_count} spikes): "
               f"threshold={best_threshold:.4f}  recall={recall[best_idx]:.2%}  "
-              f"precision={precision[best_idx]:.2%}  f1={f1[best_idx]:.3f}", file=buf)
+              f"precision={precision[best_idx]:.2%}  f1={f1[best_idx]:.3f}  "
+              f"lag={lag:+d}", file=buf)
 
     except Exception as e:
         row["status"] = f"failed: {e}"

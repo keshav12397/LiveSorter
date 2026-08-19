@@ -161,14 +161,41 @@ def load_and_prepare(args, rng, dtype=np.float64, order="C"):
 
 
 def fit_lcmv(data, spike_t, spike_cl, np_ch, target, interferer_ids,
-             n_channels, template_length, template_offset, ridge, max_spikes, rng):
+             n_channels, template_length, template_offset, ridge, max_spikes, rng,
+             template_spike_t=None, template_spike_cl=None, extras=None):
+    """Fit one LCMV filter. This is the single implementation of the fit --
+    calibrate_for_closedloop.py, calibrate_all_units.py and
+    calibrate_drift_aware.py all call it rather than carrying their own copy.
+
+    `template_spike_t`/`template_spike_cl`, when given, supply the (subset of)
+    spikes used to build the mean-waveform templates, while the noise
+    covariance still excludes every spike in `spike_t`/`spike_cl`. A caller
+    holding out part of the recording needs exactly that split: the templates
+    must not see held-out spikes, but the noise estimate must still exclude
+    them, or those spikes get counted as noise, R absorbs the target's own
+    subspace, and the LCMV solve dutifully suppresses it. Default None
+    reproduces the previous behaviour exactly.
+
+    `extras`, if a dict is passed, receives the channel-subset templates the
+    fit built. They are needed to compute the filter's detection lag (see
+    generate_filter.detection_lag) and recomputing them outside would mean a
+    second, differently-subsampled mean waveform. Purely an out-parameter --
+    the return value is unchanged.
+    """
     target_spikes = spike_t[spike_cl == target]
     interferer_times = [spike_t[spike_cl == cid] for cid in interferer_ids]
 
-    target_wf, _ = gf.mean_waveform(data, target_spikes, template_length,
+    if template_spike_t is None:
+        tmpl_t, tmpl_cl = spike_t, spike_cl
+    else:
+        tmpl_t, tmpl_cl = template_spike_t, template_spike_cl
+    target_tmpl = tmpl_t[tmpl_cl == target]
+    interferer_tmpl = [tmpl_t[tmpl_cl == cid] for cid in interferer_ids]
+
+    target_wf, _ = gf.mean_waveform(data, target_tmpl, template_length,
                                      template_offset, max_spikes, rng)
     interferer_wfs = [gf.mean_waveform(data, t, template_length, template_offset,
-                                        max_spikes, rng)[0] for t in interferer_times]
+                                        max_spikes, rng)[0] for t in interferer_tmpl]
 
     sel = gf.select_channels(target_wf, interferer_wfs, n_channels)
     sel_channels = np_ch[sel]
@@ -188,6 +215,10 @@ def fit_lcmv(data, spike_t, spike_cl, np_ch, target, interferer_ids,
     interferer_flats = [wf.T.ravel() for wf in interferer_wfs_sel]
     f_flat = gf.lcmv_filter(s_flat, interferer_flats, R, ridge=ridge)
     f = f_flat.reshape(len(sel), template_length).T
+
+    if extras is not None:
+        extras["target_template_sel"] = s
+        extras["interferer_templates_sel"] = interferer_wfs_sel
 
     print(f"Constraint check -- gain on target: {np.dot(f_flat, s_flat):.4f} (want 1.0)")
     for cid, s_int in zip(interferer_ids, interferer_flats):
