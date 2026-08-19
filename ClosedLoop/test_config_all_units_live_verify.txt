@@ -1,0 +1,41 @@
+# Verification config for the GUI branch's live end-to-end test (viewer +
+# ClosedLoopAllUnits against the synthetic session SpikeGLX is now replaying
+# on localhost:4142). syllableSource=imecSy because the rig's NI stream
+# cannot carry synthetic syllable codes -- see README.md and mainAllUnits.cpp.
+#
+# filterDir points at D:/sim_session/filters_baseline rather than
+# D:/sim_session_v2 (not generated yet at verification time) or
+# D:/sim_check/filters (empty at verification time) -- same generator,
+# pre-drift-fix. Good enough to exercise the wire format and the viewer;
+# not a recall/precision claim.
+sglxHost=localhost
+sglxPort=4142
+filterDir=D:/sim_session/filters_baseline
+templateLength=61
+filterNChannels=5
+carChannelMapJson=D:/test_newsorter/rawData/shank1only.json
+applyHighpass=true
+highpassCutoffHz=300
+fetchChunkMs=5
+imecSyncBit=6
+
+syllableSource=imecSy
+imecSyllableBits=0,1,2
+niDebounceSamples=10
+
+decisionUnitIds=51
+windowStartMs=0
+windowEndMs=100
+spikeCountThreshold=3
+doLine=Dev4/port0/line5
+doPulseMs=50
+
+spikeTimesPath=D:/scratch/gui_verify_spikeTimes.csv
+syllableTimesPath=D:/scratch/gui_verify_syllableTimes.csv
+decisionLogPath=D:/scratch/gui_verify_decisions.log
+decisionCsvPath=D:/scratch/gui_verify_decisions.csv
+latencyLogPath=D:/scratch/gui_verify_latency.csv
+
+viewerEnabled=true
+viewerPort=4143
+runDurationSec=30
