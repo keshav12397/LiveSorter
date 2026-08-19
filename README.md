@@ -222,6 +222,15 @@ follows). This means:
 
 ## Building
 
+**`SglxApi.dll` must sit next to the built `.exe`.** The copy in the repo
+root is there for exactly that reason -- both build tasks emit their exe
+into the repo root, and Windows resolves the DLL from the executable's own
+directory. It is byte-identical to `SDK/API/SglxApi.dll`, so it looks like a
+redundant duplicate and has been deleted as one at least once; deleting it
+makes every build still link fine and then fail at launch with exit code
+0xC0000135 (STATUS_DLL_NOT_FOUND) and no message.
+
+
 `.vscode/tasks.json` has a `"build closed loop"` task, mirroring the
 existing `"build demo"` task's `cl.exe` invocation. Run via VS Code's
 "Tasks: Run Task", or from a Developer Command Prompt:
