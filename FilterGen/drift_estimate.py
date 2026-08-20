@@ -84,10 +84,19 @@ def _position_from_waveform(wf, chan_y, n_top):
 
 def unit_trajectory(data, spike_times, chan_y, template_length, template_offset,
                     fs, spikes_per_bin=150, max_bins=60, max_bin_spikes=400,
-                    n_top=8, rng=None, smooth=3):
+                    n_top=8, rng=None, smooth=3, return_waveforms=False):
     """Estimate one unit's depth over time.
 
-    Returns (t_center_s, y_um), both 1-D and ascending in time.
+    Returns (t_center_s, y_um), both 1-D and ascending in time. With
+    `return_waveforms=True`, returns (t_center_s, y_um, waveforms, n_spikes)
+    instead, where `waveforms[i]` is bin i's own mean waveform
+    (template_length x n_group_channels, physical channel order, the exact
+    array `generate_filter.mean_waveform` returns) and `n_spikes[i]` is that
+    bin's spike count -- both consumed by `motion_correct.registered_template`
+    to build a single motion-corrected template without a second binning
+    pass. `y_um` there is the *unsmoothed* per-bin position (smoothing is a
+    segmentation aid, see below; registration wants the bin's own estimate,
+    not its neighbours').
 
     Bins hold an equal *number of spikes*, not an equal amount of time. A
     unit's position can only be estimated where it fired, and a fixed time
@@ -100,13 +109,14 @@ def unit_trajectory(data, spike_times, chan_y, template_length, template_offset,
     st = st[(st > template_offset) &
             (st < data.shape[0] - template_length + template_offset)]
     if st.size == 0:
-        return np.zeros(0), np.zeros(0)
+        empty = (np.zeros(0), np.zeros(0))
+        return empty + ([], []) if return_waveforms else empty
     st = np.sort(st)
 
     n_bins = int(np.clip(st.size // spikes_per_bin, 1, max_bins))
     edges = np.linspace(0, st.size, n_bins + 1).astype(int)
 
-    t_c, y = [], []
+    t_c, y, wfs, ns = [], [], [], []
     for b in range(n_bins):
         bin_st = st[edges[b]:edges[b + 1]]
         if bin_st.size == 0:
@@ -118,17 +128,36 @@ def unit_trajectory(data, spike_times, chan_y, template_length, template_offset,
             continue
         t_c.append(float(np.median(bin_st)) / fs)
         y.append(pos)
+        wfs.append(wf)
+        ns.append(int(bin_st.size))
 
     t_c = np.asarray(t_c)
-    y = np.asarray(y)
-    if smooth > 1 and y.size >= smooth:
-        # Running median, not a mean: a 'jump' trajectory is a step function,
-        # and a mean smears the step across the window -- which is precisely
-        # the boundary the segmenter has to find.
-        half = smooth // 2
-        pad = np.pad(y, half, mode="edge")
-        y = np.array([np.median(pad[i:i + smooth]) for i in range(y.size)])
-    return t_c, y
+    y_raw = np.asarray(y)
+    if return_waveforms:
+        return t_c, y_raw, wfs, ns
+
+    return t_c, smooth_trajectory(y_raw, smooth)
+
+
+def smooth_trajectory(y_um, smooth=3):
+    """Running median of a per-bin trajectory, `unit_trajectory`'s own
+    smoothing step factored out so `calibrate_drift_aware.py`'s 'registered'
+    mode can compute the *same* segment boundaries `segment_from_trajectory`
+    would get from a normal `unit_trajectory` call, while separately using
+    the unsmoothed per-bin waveforms (`return_waveforms=True`) for
+    registration -- one binning pass, two consumers, instead of a second
+    smoothing implementation.
+
+    A running median, not a mean: a 'jump' trajectory is a step function,
+    and a mean smears the step across the window -- which is precisely the
+    boundary the segmenter has to find.
+    """
+    y_um = np.asarray(y_um)
+    if smooth <= 1 or y_um.size < smooth:
+        return y_um
+    half = smooth // 2
+    pad = np.pad(y_um, half, mode="edge")
+    return np.array([np.median(pad[i:i + smooth]) for i in range(y_um.size)])
 
 
 def segment_from_trajectory(t_center_s, y_um, spike_times, fs, n_samples,

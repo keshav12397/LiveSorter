@@ -162,7 +162,8 @@ def load_and_prepare(args, rng, dtype=np.float64, order="C"):
 
 def fit_lcmv(data, spike_t, spike_cl, np_ch, target, interferer_ids,
              n_channels, template_length, template_offset, ridge, max_spikes, rng,
-             template_spike_t=None, template_spike_cl=None, extras=None):
+             template_spike_t=None, template_spike_cl=None, extras=None,
+             target_waveform_override=None):
     """Fit one LCMV filter. This is the single implementation of the fit --
     calibrate_for_closedloop.py, calibrate_all_units.py and
     calibrate_drift_aware.py all call it rather than carrying their own copy.
@@ -175,6 +176,17 @@ def fit_lcmv(data, spike_t, spike_cl, np_ch, target, interferer_ids,
     them, or those spikes get counted as noise, R absorbs the target's own
     subspace, and the LCMV solve dutifully suppresses it. Default None
     reproduces the previous behaviour exactly.
+
+    `target_waveform_override`, when given, replaces the target's own
+    mean-waveform computation outright -- used by calibrate_drift_aware.py's
+    'registered' mode to hand in a motion-corrected template built from the
+    unit's spikes across the *whole* recording (see motion_correct.py)
+    rather than just this segment's. Must be (template_length,
+    data.shape[1]), i.e. the same full-group shape gf.mean_waveform()
+    returns; select_channels, R, and the LCMV solve all still run exactly
+    as before, on whatever this template says. Interferer templates are
+    unaffected -- only the target's smearing is what registration exists
+    to fix (see motion_correct.py's docstring).
 
     `extras`, if a dict is passed, receives the channel-subset templates the
     fit built. They are needed to compute the filter's detection lag (see
@@ -192,8 +204,11 @@ def fit_lcmv(data, spike_t, spike_cl, np_ch, target, interferer_ids,
     target_tmpl = tmpl_t[tmpl_cl == target]
     interferer_tmpl = [tmpl_t[tmpl_cl == cid] for cid in interferer_ids]
 
-    target_wf, _ = gf.mean_waveform(data, target_tmpl, template_length,
-                                     template_offset, max_spikes, rng)
+    if target_waveform_override is not None:
+        target_wf = target_waveform_override
+    else:
+        target_wf, _ = gf.mean_waveform(data, target_tmpl, template_length,
+                                         template_offset, max_spikes, rng)
     interferer_wfs = [gf.mean_waveform(data, t, template_length, template_offset,
                                         max_spikes, rng)[0] for t in interferer_tmpl]
 

@@ -4,7 +4,12 @@ calibrate_drift_aware.py
 
 Drift-aware batch calibration: like `calibrate_all_units.py`, but each unit
 gets one filter *per time segment inside which it did not move*, plus a
-schedule saying when to swap them in.
+schedule saying when to swap them in. Two ways of building each segment's
+target template are implemented, selected by `--mode`: 'segmented' uses only
+that segment's own spikes; 'registered' motion-corrects the unit's WHOLE
+trajectory onto that segment's position instead (see `motion_correct.py`).
+Both re-select channels per segment -- see `motion_correct.py`'s "What this
+does not fix" for why that part cannot be skipped even under registration.
 
 The problem
 -----------
@@ -36,12 +41,16 @@ Every fit here goes through `threshold_sweep_real.fit_lcmv`,
 `generate_filter.auto_pick_interferers_spatial`,
 `threshold_sweep_real.find_all_peaks` and
 `threshold_sweep_real.sweep_thresholds` -- the same functions
-`calibrate_all_units.py` calls, not copies of them. The only change made to
-any of them is `fit_lcmv`'s optional `template_spike_t`/`template_spike_cl`,
-which this file needs to build a template from train-cell spikes only while
-still excluding held-out spikes from the noise covariance. This repo has
-twice silently lost recall to a second, drifted reimplementation of this
-math; there is no second implementation here.
+`calibrate_all_units.py` calls, not copies of them. The only changes made to
+any of them are `fit_lcmv`'s optional `template_spike_t`/`template_spike_cl`
+(build a template from train-cell spikes only, while still excluding
+held-out spikes from the noise covariance) and its optional
+`target_waveform_override` ('registered' mode's motion-corrected template,
+built by `motion_correct.registered_template` -- the ONLY new numerical
+routine in this feature; it operates on already-built mean waveforms, never
+touches the LCMV solve or noise covariance itself). This repo has twice
+silently lost recall to a second, drifted reimplementation of this math;
+there is no second implementation of `fit_lcmv`/`lcmv_filter` here.
 
 Evaluation protocol (and why it differs from calibrate_all_units.py's)
 ----------------------------------------------------------------------
@@ -119,6 +128,7 @@ import numpy as np
 
 import drift_estimate as de
 import generate_filter as gf
+import motion_correct as mc
 import threshold_sweep_real as tsr
 
 # Same reason as calibrate_all_units.py: N worker processes each fanning
@@ -160,12 +170,23 @@ def _init_worker(tmp_path, dtype, shape, np_ch, chan_y, positions, labels,
 
 
 def _fit_one_segment(data, lo, hi, spike_t, spike_cl, tr_mask, target_id, a,
-                     np_ch, positions, labels, rng):
+                     np_ch, positions, labels, rng, registration=None):
     """Fit one filter on [lo, hi) and score its held-out cells.
 
     Returns (sel_channels, f, peak_idx_abs, peak_scores, noise_std). Peak
     indices come back in absolute recording samples so segments can be
     pooled into one threshold sweep.
+
+    `registration`, if given, is a dict with this unit's full-recording
+    trajectory bins (t_c, y_raw, wfs, ns -- see
+    drift_estimate.unit_trajectory(..., return_waveforms=True)) plus
+    chan_y/decay_um. When present, the target's template is built by
+    motion_correct.registered_template() from ALL of the unit's bins
+    (registered to this segment's own median position), instead of from
+    just the spikes that happen to fall inside [lo, hi) -- see
+    motion_correct.py's module docstring for why. Channel selection, the
+    noise covariance, and interferer templates are computed exactly as
+    without registration, from this segment's own data only.
     """
     in_seg = (spike_t >= lo) & (spike_t < hi)
     seg_t = spike_t[in_seg] - lo
@@ -184,12 +205,32 @@ def _fit_one_segment(data, lo, hi, spike_t, spike_cl, tr_mask, target_id, a,
     if not interferer_ids:
         raise ValueError("no interferers found nearby")
 
+    target_override = None
+    if registration is not None:
+        t_c, y_raw, wfs, ns = (registration["t_c"], registration["y_raw"],
+                               registration["wfs"], registration["ns"])
+        in_bin = (t_c >= lo / a["fs"]) & (t_c < hi / a["fs"])
+        # This segment's own reference position: median of its own bins if
+        # it has any (matches where segment_from_trajectory cut the
+        # boundary), else the nearest bin in time -- a segment can be
+        # entirely inside one interleave train gap and still own zero bins
+        # if the unit happened not to fire there, which registration (unlike
+        # plain per-segment fitting) can still recover from.
+        if np.any(in_bin):
+            ref_y = float(np.median(y_raw[in_bin]))
+        else:
+            mid = 0.5 * (lo + hi) / a["fs"]
+            ref_y = float(y_raw[int(np.argmin(np.abs(t_c - mid)))])
+        target_override = mc.registered_template(
+            y_raw, wfs, ns, ref_y, registration["chan_y"], registration["decay_um"])
+
     extras = {}
     f, sel, sel_channels, _, _ = tsr.fit_lcmv(
         data_seg, seg_t, seg_cl, np_ch, target_id, interferer_ids,
         a["n_channels"], a["template_length"], a["template_offset"],
         a["ridge"], a["max_spikes"], rng, extras=extras,
-        template_spike_t=seg_t[seg_tr], template_spike_cl=seg_cl[seg_tr])
+        template_spike_t=seg_t[seg_tr], template_spike_cl=seg_cl[seg_tr],
+        target_waveform_override=target_override)
 
     if len(sel_channels) != a["n_channels"]:
         raise ValueError(f"only {len(sel_channels)} channels available, "
@@ -221,7 +262,11 @@ def _fit_one_segment(data, lo, hi, spike_t, spike_cl, tr_mask, target_id, a,
 
 def _fit_one_unit(target_id, spike_count, mode):
     """Runs in a worker process. `mode` is 'global' (force a single segment,
-    i.e. the baseline fit under this protocol) or 'segmented'."""
+    i.e. the baseline fit under this protocol), 'segmented' (drift-aware
+    channel reselection, each segment's template built from its own spikes
+    only), or 'registered' (same segmentation for channel reselection, but
+    each segment's target template is motion-corrected from the unit's
+    WHOLE trajectory -- see motion_correct.py)."""
     data = _worker["data"]
     np_ch, chan_y = _worker["np_ch"], _worker["chan_y"]
     positions, labels = _worker["positions"], _worker["labels"]
@@ -244,7 +289,8 @@ def _fit_one_unit(target_id, spike_count, mode):
 
     try:
         target_all = spike_t[spike_cl == target_id]
-        if mode == "segmented":
+        registration = None
+        if mode in ("segmented", "registered"):
             t_c, y = de.unit_trajectory(
                 data, target_all, chan_y, a["template_length"],
                 a["template_offset"], a["fs"],
@@ -253,6 +299,20 @@ def _fit_one_unit(target_id, spike_count, mode):
             segs = de.segment_from_trajectory(
                 t_c, y, target_all, a["fs"], n_samples, a["tol_um"],
                 a["min_spikes_per_segment"], a["max_segments"])
+            if mode == "registered" and t_c.size:
+                # Same bins segment_from_trajectory just cut on (smoothed y,
+                # for identical boundaries to 'segmented'), plus the raw
+                # per-bin waveforms/positions/counts registered_template()
+                # needs -- one extra unit_trajectory call (cheap: binning +
+                # per-bin mean_waveform, not a fit) rather than threading
+                # smoothed and unsmoothed state through one call.
+                t_c_raw, y_raw, wfs, ns = de.unit_trajectory(
+                    data, target_all, chan_y, a["template_length"],
+                    a["template_offset"], a["fs"],
+                    spikes_per_bin=a["spikes_per_bin"], rng=rng,
+                    return_waveforms=True)
+                registration = dict(t_c=t_c_raw, y_raw=y_raw, wfs=wfs, ns=ns,
+                                    chan_y=chan_y, decay_um=a["decay_um"])
         else:
             drift_span = float("nan")
             segs = [(0, n_samples)]
@@ -266,7 +326,7 @@ def _fit_one_unit(target_id, spike_count, mode):
             with contextlib.redirect_stdout(buf):
                 sel_channels, f, pidx, pscore, nstd, ints, lag = _fit_one_segment(
                     data, lo, hi, spike_t, spike_cl, tr_mask, target_id, a,
-                    np_ch, positions, labels, rng)
+                    np_ch, positions, labels, rng, registration=registration)
             seg_packed.append((lo, hi, sel_channels, f))
             seg_interferers.extend(ints)
             all_peaks.append(pidx)
@@ -423,13 +483,21 @@ def main():
     ap.add_argument("--bin-path", required=True)
     ap.add_argument("--meta-path")
     ap.add_argument("--channel-map-json")
-    ap.add_argument("--mode", choices=["global", "segmented", "both"], default="both",
+    ap.add_argument("--mode", choices=["global", "segmented", "registered", "both", "all"],
+                    default="both",
                     help="'global' is the baseline fit under this script's "
                          "interleaved protocol (one filter per unit); "
-                         "'segmented' is drift-aware. 'both' runs each from "
-                         "one preprocessing pass, which is the only "
-                         "controlled comparison -- same train samples, same "
-                         "test samples, same RNG seeds.")
+                         "'segmented' re-selects channels and refits per "
+                         "drift segment, from that segment's own spikes "
+                         "only; 'registered' re-selects channels the same "
+                         "way but builds each segment's target template by "
+                         "motion-correcting the unit's WHOLE trajectory onto "
+                         "that segment's position (motion_correct.py) "
+                         "instead of using only that segment's own spikes. "
+                         "'both' runs global+segmented; 'all' runs all three. "
+                         "Multi-mode runs share one preprocessing pass and "
+                         "identical train/test samples and RNG seeds per "
+                         "unit, which is the only controlled comparison.")
     ap.add_argument("--n-channels", type=int, default=5)
     ap.add_argument("--template-length", type=int, default=61)
     ap.add_argument("--template-offset", type=int, default=20)
@@ -475,6 +543,12 @@ def main():
     ap.add_argument("--spikes-per-bin", type=int, default=150,
                     help="Spikes per trajectory-estimation bin. See "
                          "drift_estimate.unit_trajectory.")
+    ap.add_argument("--decay-um", type=float, default=30.0,
+                    help="'registered' mode only: depth scale over which a "
+                         "bin far from a segment's reference position is "
+                         "downweighted when building that segment's motion-"
+                         "corrected template. See motion_correct."
+                         "registered_template.")
     ap.add_argument("--scratch-dir")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--seed", type=int, default=0)
@@ -530,12 +604,17 @@ def main():
                      train_samples=train_samples, train_frac=args.train_frac,
                      tol_um=args.tol_um, spikes_per_bin=args.spikes_per_bin,
                      min_spikes_per_segment=args.min_spikes_per_segment,
-                     max_segments=args.max_segments)
+                     max_segments=args.max_segments, decay_um=args.decay_um)
     init_args = (data_path, data_dtype, data_shape, np_ch, chan_y, positions,
                  labels, spike_t, spike_cl, unit_args)
 
     n_workers = args.workers if args.workers > 0 else (os.cpu_count() or 1)
-    modes = ["global", "segmented"] if args.mode == "both" else [args.mode]
+    if args.mode == "both":
+        modes = ["global", "segmented"]
+    elif args.mode == "all":
+        modes = ["global", "segmented", "registered"]
+    else:
+        modes = [args.mode]
 
     for mode in modes:
         out_dir = os.path.join(args.out_dir, mode) if len(modes) > 1 else args.out_dir
