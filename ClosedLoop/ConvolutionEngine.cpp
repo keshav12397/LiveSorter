@@ -243,6 +243,47 @@ std::vector<PeakEvent> ConvolutionEngine::flush()
 }
 
 
+std::vector<PeakEvent> ConvolutionEngine::processPrecomputedD(
+    const double *Dvals, size_t nD, long long firstDAbsIndex )
+{
+    std::vector<PeakEvent> peaks;
+
+    // Append newly computed D-values into the persistent score buffer,
+    // skipping indices already appended by a previous call -- a chunk's
+    // recomputation range overlaps the previous chunk's tail (same raw
+    // history, so identical D values) because of leftMargin_/rightMargin_
+    // overlap-save.
+    for( size_t idx = 0; idx < nD; ++idx ) {
+
+        const long long absIndex = firstDAbsIndex + static_cast<long long>( idx );
+
+        if( dBuffer_.empty() ) {
+            dBufferStartAbsIndex_ = absIndex;
+            dBuffer_.push_back( Dvals[idx] );
+        }
+        else if( absIndex > dBufferStartAbsIndex_ + static_cast<long long>( dBuffer_.size() ) - 1 ) {
+            dBuffer_.push_back( Dvals[idx] );
+        }
+        // else: absIndex already covered by a previous call -- skip.
+    }
+
+    // Finalize decisions up to (newestBuffered - finalizeMarginSamples_) --
+    // see decideUpTo()'s derivation comment for why this needs the true
+    // greedy selectByDistance() over a buffered window, not a per-index
+    // local check. flush() (called once at the true end of a finite
+    // stream, e.g. Calibration's training-file replay) uses the same
+    // helper with cutoff = newestBuffered directly, since there's no more
+    // future data to wait for.
+    if( !dBuffer_.empty() ) {
+        const long long newestBuffered =
+            dBufferStartAbsIndex_ + static_cast<long long>( dBuffer_.size() ) - 1;
+        decideUpTo( newestBuffered - finalizeMarginSamples_, peaks );
+    }
+
+    return peaks;
+}
+
+
 std::vector<PeakEvent> ConvolutionEngine::processChunk(
     const double *data, size_t nSamples, long long streamSampleOffset )
 {
@@ -293,37 +334,11 @@ std::vector<PeakEvent> ConvolutionEngine::processChunk(
             Dvals[idx] = sum;
         }
 
-        // Append newly computed D-values into the persistent score buffer,
-        // skipping indices already appended by a previous call -- this
-        // chunk's recomputation range overlaps the previous chunk's tail
-        // (same raw history, so identical D values) because of leftMargin_/
-        // rightMargin_ overlap-save.
-        for( size_t idx = 0; idx < nD; ++idx ) {
-
-            const long long absIndex = firstCombinedAbsIndex + static_cast<long long>( firstValid + idx );
-
-            if( dBuffer_.empty() ) {
-                dBufferStartAbsIndex_ = absIndex;
-                dBuffer_.push_back( Dvals[idx] );
-            }
-            else if( absIndex > dBufferStartAbsIndex_ + static_cast<long long>( dBuffer_.size() ) - 1 ) {
-                dBuffer_.push_back( Dvals[idx] );
-            }
-            // else: absIndex already covered by a previous call -- skip.
-        }
-    }
-
-    // Finalize decisions up to (newestBuffered - finalizeMarginSamples_) --
-    // see decideUpTo()'s derivation comment for why this needs the true
-    // greedy selectByDistance() over a buffered window, not a per-index
-    // local check. flush() (called once at the true end of a finite
-    // stream, e.g. Calibration's training-file replay) uses the same
-    // helper with cutoff = newestBuffered directly, since there's no more
-    // future data to wait for.
-    if( !dBuffer_.empty() ) {
-        const long long newestBuffered =
-            dBufferStartAbsIndex_ + static_cast<long long>( dBuffer_.size() ) - 1;
-        decideUpTo( newestBuffered - finalizeMarginSamples_, peaks );
+        // Buffering and deciding are delegated, NOT repeated here -- see
+        // processPrecomputedD()'s header comment. One copy of that logic.
+        peaks = processPrecomputedD(
+            Dvals.data(), nD,
+            firstCombinedAbsIndex + static_cast<long long>( firstValid ) );
     }
 
     // Keep the tail of combined (last L-1 samples) as history for next call

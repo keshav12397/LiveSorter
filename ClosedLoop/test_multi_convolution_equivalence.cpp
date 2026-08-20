@@ -44,6 +44,8 @@
 
 namespace {
 
+struct Plan { const char *name; std::vector<size_t> sizes; };
+
 const int  kChannelsGroup = 96;     // shank1only.json's size, the live CAR group
 const int  kUnits         = 8;
 const int  kChansPerUnit  = 5;
@@ -116,9 +118,9 @@ bool same( const std::vector<MultiPeakEvent> &a, const std::vector<MultiPeakEven
 // Feed the whole stream through the batched engine using `plan` as a
 // repeating cycle of chunk sizes.
 std::vector<MultiPeakEvent> runBatched( const Fixture &fx, const std::vector<size_t> &plan,
-                                        int nThreads )
+                                        int nThreads, bool fastPath = false )
 {
-    MultiConvolutionEngine eng( fx.bank, kChannelsGroup, kMinSep, nThreads );
+    MultiConvolutionEngine eng( fx.bank, kChannelsGroup, kMinSep, nThreads, fastPath );
     std::vector<MultiPeakEvent> all;
     long long off = 0;
     size_t p = 0;
@@ -229,7 +231,6 @@ int main()
     ok &= same( ref, bat, "fixed 2000-sample chunks" );
 
     std::printf( "2. chunking invariance\n" );
-    struct Plan { const char *name; std::vector<size_t> sizes; };
     std::vector<Plan> plans = {
         { "1-sample chunks",         { 1 } },
         { "sub-history (17)",        { 17 } },
@@ -257,7 +258,82 @@ int main()
         ok &= match;
     }
 
-    std::printf( "3. thread-count invariance\n" );
+    std::printf( "3. float32 fast path vs the float64 reference\n" );
+    {
+        // The fast path is NOT bit-exact with the reference and is not meant
+        // to be: it accumulates in float32, which is the precision
+        // calibrate_all_units.py picks thresholds in. What must hold is that
+        // the DECISIONS agree -- and where they do not, that the disagreement
+        // is confined to peaks sitting within float32 rounding of their
+        // threshold, which are by definition arbitrary either way.
+        std::vector<MultiPeakEvent> fastRun = sorted( runBatched( fx, { 997 }, 4, true ) );
+
+        double maxRel = 0.0;
+        size_t matched = 0;
+        // Index the reference by (unit, sample) so scores can be compared for
+        // the peaks both paths found.
+        for( size_t i = 0, j = 0; i < ref.size() && j < fastRun.size(); ) {
+            if( ref[i].sampleIndex == fastRun[j].sampleIndex &&
+                ref[i].unitIndex == fastRun[j].unitIndex ) {
+                double a = ref[i].score, b = fastRun[j].score;
+                double denom = ( a != 0.0 ) ? ( a < 0 ? -a : a ) : 1.0;
+                double rel = ( a - b < 0 ? b - a : a - b ) / denom;
+                if( rel > maxRel ) maxRel = rel;
+                ++matched; ++i; ++j;
+            }
+            else if( ref[i].sampleIndex < fastRun[j].sampleIndex ||
+                     ( ref[i].sampleIndex == fastRun[j].sampleIndex &&
+                       ref[i].unitIndex < fastRun[j].unitIndex ) ) ++i;
+            else ++j;
+        }
+        size_t onlyRef  = ref.size() - matched;
+        size_t onlyFast = fastRun.size() - matched;
+        std::printf( "  reference %zu peaks, fast %zu, agreeing %zu "
+                     "(ref-only %zu, fast-only %zu)\n",
+                     ref.size(), fastRun.size(), matched, onlyRef, onlyFast );
+        std::printf( "  max relative score difference on agreeing peaks: %.3g\n", maxRel );
+
+        // Tolerances, and why these numbers. Accumulating L*nCh = 305
+        // products in float32 carries ~sqrt(305)*6e-8 ~ 1e-6 relative error,
+        // so 1e-5 is a decade of headroom over the expected bound and would
+        // still catch a genuine indexing or layout error, which produces
+        // O(1) differences rather than O(1e-6) ones.
+        bool okRel = ( maxRel < 1e-5 );
+        std::printf( "  [%s] score agreement within 1e-5\n", okRel ? "PASS" : "FAIL" );
+        ok &= okRel;
+
+        // Disagreements must be rare AND explainable as threshold-boundary
+        // cases. 0.1% is the ceiling; anything systematically wrong blows
+        // straight past it.
+        double disagreeFrac = double( onlyRef + onlyFast ) /
+                              double( ref.size() ? ref.size() : 1 );
+        bool okSet = ( disagreeFrac < 1e-3 );
+        std::printf( "  [%s] decision disagreement %.4f%% (< 0.1%%)\n",
+                     okSet ? "PASS" : "FAIL", 100.0 * disagreeFrac );
+        ok &= okSet;
+    }
+
+    std::printf( "4. fast path: chunking invariance\n" );
+    {
+        std::vector<MultiPeakEvent> base = sorted( runBatched( fx, { 997 }, 4, true ) );
+        std::vector<Plan> fp = {
+            { "fast: sub-history (17)",   { 17 } },
+            { "fast: ragged 1/3/60/997",  { 1, 3, 60, 997 } },
+            { "fast: one giant chunk",    { static_cast<size_t>( kSamples ) } },
+        };
+        for( size_t i = 0; i < fp.size(); ++i ) {
+            std::vector<MultiPeakEvent> got = sorted( runBatched( fx, fp[i].sizes, 4, true ) );
+            ok &= same( base, got, fp[i].name );
+        }
+        // Thread-count invariance on the fast path too: the vector/scalar
+        // split is by output index, not by worker, but that is worth
+        // asserting rather than assuming.
+        std::vector<MultiPeakEvent> t1 = runBatched( fx, { 997 }, 1, true );
+        std::vector<MultiPeakEvent> t8 = runBatched( fx, { 997 }, 8, true );
+        ok &= same( t1, t8, "fast: 1 worker vs 8 workers" );
+    }
+
+    std::printf( "5. thread-count invariance (reference path)\n" );
     std::vector<MultiPeakEvent> t1 = runBatched( fx, { 997 }, 1 );
     std::vector<MultiPeakEvent> t8 = runBatched( fx, { 997 }, 8 );
     // NOT sorted here: these are compared as emitted, which is the actual

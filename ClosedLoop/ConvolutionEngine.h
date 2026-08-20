@@ -63,6 +63,38 @@ public:
     std::vector<PeakEvent> processChunk( const double *data, size_t nSamples,
                                           long long streamSampleOffset );
 
+    // Feeds ALREADY-COMPUTED D (matched-filter output) values in, skipping
+    // this class's own convolution entirely, and runs the identical
+    // buffering + decision + trim steps processChunk() runs.
+    //
+    // This exists so a faster convolution can be substituted WITHOUT
+    // reimplementing the decision rule. That split is deliberate and is the
+    // whole point: "samples -> D" is a dense inner loop worth optimising and
+    // easy to test against a reference, while "D -> peaks" is the windowed
+    // non-max suppression whose derivation this file spends fifty lines
+    // justifying and which this codebase has twice silently got wrong when
+    // rewritten. MultiConvolutionEngine computes D in float32 (matching the
+    // precision calibrate_all_units.py picks thresholds in) and hands it
+    // here.
+    //
+    // processChunk() itself calls this, so there is exactly one copy of the
+    // buffering/decision logic and the two paths cannot diverge.
+    //
+    // D[i] is the value centered on absolute sample index
+    // (firstDAbsIndex + i). Indices at or below ones already buffered by a
+    // previous call are skipped, exactly as processChunk()'s overlap-save
+    // recomputation range is.
+    std::vector<PeakEvent> processPrecomputedD( const double *Dvals, size_t nD,
+                                                 long long firstDAbsIndex );
+
+    // Margins a caller computing its own D must respect: a D value centered
+    // on index n needs leftMargin() samples before n and rightMargin() after.
+    // Exposed so an external convolution can reproduce the same centered
+    // window rather than re-deriving it -- see this file's PeakEvent comment
+    // on what re-deriving that convention cost last time.
+    int leftMargin() const { return leftMargin_; }
+    int rightMargin() const { return rightMargin_; }
+
     // Forces a final decision round over whatever is currently buffered,
     // treating the buffer's end as if no more data will ever arrive --
     // call this ONCE at the true end of a finite stream (e.g. Calibration's

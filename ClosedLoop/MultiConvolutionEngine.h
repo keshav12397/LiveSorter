@@ -10,6 +10,7 @@
 
 #include "MultiFilterBank.h"
 #include "ConvolutionEngine.h"
+#include "FastMatchedFilter.h"
 
 // One accepted detection. unitIndex is a position into MultiFilterBank's
 // arrays (0..nUnits-1) -- NOT the Kilosort cluster id; translate via
@@ -83,8 +84,23 @@ public:
     // means that class's own templateLength/2 default.
     // nThreads: 0 means hardware_concurrency(), clamped to at least 1 and to
     // at most nUnits (more workers than units cannot help).
+    //
+    // fastPath: which convolution computes D.
+    //   true  (default) FastMatchedFilter -- float32, vectorised over output
+    //         samples. This is the PRODUCTION path, and float32 is the point
+    //         of it as much as the speed: calibrate_all_units.py picks
+    //         thresholds by scoring float32 filters against float32 data, so
+    //         this is the precision those thresholds were chosen in.
+    //   false ConvolutionEngine's own float64 convolution. Kept as the exact
+    //         reference the fast path is tested against, and as the answer to
+    //         "is this difference the fast path or the data?" -- a question
+    //         worth being able to settle in one flag rather than one rebuild.
+    // Peak DECISIONS are identical either way: both feed the same
+    // ConvolutionEngine, only the D values differ, and only in float32
+    // rounding.
     MultiConvolutionEngine( const MultiFilterBank &bank, int nChannelsGroup,
-                            long long minSeparationSamples = 0, int nThreads = 0 );
+                            long long minSeparationSamples = 0, int nThreads = 0,
+                            bool fastPath = true );
     ~MultiConvolutionEngine();
 
     MultiConvolutionEngine( const MultiConvolutionEngine & ) = delete;
@@ -151,6 +167,21 @@ private:
     long long       minSeparationSamples_;
 
     std::vector<ConvolutionEngine> engines_;
+
+    // Parallel to engines_, and populated only when fastPath_ is set. Each
+    // owns its unit's channel-major float32 sample history; engines_[u] then
+    // owns only the D-buffer and the decisions.
+    bool                           fastPath_;
+    std::vector<FastMatchedFilter> fast_;
+    std::vector<std::vector<double>> dScratch_;   // per-unit, reused
+
+    // The chunk transposed to channel-major float32 once per processChunk(),
+    // shared read-only by every worker: groupT_[ch * jobSamples_ + t]. See
+    // FastMatchedFilter::computeD() for why this is not left as a per-unit
+    // gather -- briefly, a strided gather out of a 384-channel time-major
+    // buffer wastes ~7/8 of every cache line it touches, and doing it per
+    // unit repeats that N times over the same data.
+    std::vector<float> groupT_;
 
     // Per-unit scratch for the channel gather, allocated once. Each is
     // nChannelsPerUnit * maxSamplesSeen_ doubles and grows on demand rather

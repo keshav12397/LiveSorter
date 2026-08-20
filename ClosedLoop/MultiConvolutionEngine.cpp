@@ -6,9 +6,9 @@
 MultiConvolutionEngine::MultiConvolutionEngine( const MultiFilterBank &bank,
                                                 int nChannelsGroup,
                                                 long long minSeparationSamples,
-                                                int nThreads )
+                                                int nThreads, bool fastPath )
     :   bank_( bank ), nUnits_( bank.nUnits ), nChannelsGroup_( nChannelsGroup ),
-        minSeparationSamples_( minSeparationSamples )
+        minSeparationSamples_( minSeparationSamples ), fastPath_( fastPath )
 {
     if( nUnits_ <= 0 )
         throw std::runtime_error( "MultiConvolutionEngine: filter bank has no units" );
@@ -47,6 +47,19 @@ MultiConvolutionEngine::MultiConvolutionEngine( const MultiFilterBank &bank,
 
     gather_.resize( static_cast<size_t>( nUnits_ ) );
     out_.resize( static_cast<size_t>( nUnits_ ) );
+    dScratch_.resize( static_cast<size_t>( nUnits_ ) );
+
+    if( fastPath_ ) {
+        fast_.reserve( static_cast<size_t>( nUnits_ ) );
+        for( int u = 0; u < nUnits_; ++u ) {
+            // Margins come FROM the engine, never re-derived here -- the
+            // centered "same"-mode convention is the one piece of index
+            // arithmetic in this pipeline that has already been silently got
+            // wrong once (see ConvolutionEngine.h's PeakEvent comment).
+            fast_.emplace_back( L, nc, bank_.unitFilter( u ),
+                                engines_[u].leftMargin(), engines_[u].rightMargin() );
+        }
+    }
 
     int hw = static_cast<int>( std::thread::hardware_concurrency() );
     if( nThreads <= 0 )
@@ -88,22 +101,32 @@ void MultiConvolutionEngine::runUnit( int u )
         const int nc = bank_.nChannelsPerUnit;
         const int32_t *chans = bank_.unitChannels( u );
 
-        // The channel gather: slice this unit's nc columns out of the full
-        // CAR-group chunk into a contiguous [t*nc+c] buffer, which is the
-        // layout ConvolutionEngine expects. This is the CPU counterpart of
-        // the GPU kernel's staging into shared memory. Doing it inside the
-        // worker (rather than once up front for all units) keeps each
-        // unit's small buffer hot in that core's own cache.
-        std::vector<double> &g = gather_[u];
-        g.resize( jobSamples_ * static_cast<size_t>( nc ) );
-        for( size_t t = 0; t < jobSamples_; ++t ) {
-            const double *src = jobData_ + t * static_cast<size_t>( nChannelsGroup_ );
-            double *dst = &g[t * static_cast<size_t>( nc )];
-            for( int c = 0; c < nc; ++c )
-                dst[c] = src[chans[c]];
+        if( fastPath_ ) {
+            // Gather, layout transform and float32 narrowing all happen in
+            // one pass inside computeD -- the gather had to run anyway to
+            // slice this unit's channels out of the CAR group, so the
+            // channel-major layout the vectorised loop needs costs nothing
+            // extra. engines_[u] then does decisions only.
+            long long firstD = 0;
+            size_t nD = fast_[u].computeD( groupT_.data(), jobSamples_, jobSamples_,
+                                            chans, jobOffset_, dScratch_[u], &firstD );
+            if( nD > 0 )
+                peaks = engines_[u].processPrecomputedD( dScratch_[u].data(), nD, firstD );
         }
-
-        peaks = engines_[u].processChunk( g.data(), jobSamples_, jobOffset_ );
+        else {
+            // Reference path: slice this unit's nc columns out of the full
+            // CAR-group chunk into the [t*nc+c] layout ConvolutionEngine
+            // expects, and let it do its own float64 convolution.
+            std::vector<double> &g = gather_[u];
+            g.resize( jobSamples_ * static_cast<size_t>( nc ) );
+            for( size_t t = 0; t < jobSamples_; ++t ) {
+                const double *src = jobData_ + t * static_cast<size_t>( nChannelsGroup_ );
+                double *dst = &g[t * static_cast<size_t>( nc )];
+                for( int c = 0; c < nc; ++c )
+                    dst[c] = src[chans[c]];
+            }
+            peaks = engines_[u].processChunk( g.data(), jobSamples_, jobOffset_ );
+        }
     }
 
     const float thr = bank_.thresholds[static_cast<size_t>( u )];
@@ -191,6 +214,23 @@ std::vector<MultiPeakEvent> MultiConvolutionEngine::processChunk(
     jobSamples_ = nSamples;
     jobOffset_  = streamSampleOffset;
     jobIsFlush_ = false;
+
+    if( fastPath_ ) {
+        // Transpose to channel-major float32 ONCE, before the workers start.
+        // Read time-major (sequential in the source) and scatter across
+        // channel rows, which is the cheaper direction here: the source is
+        // read at full cache-line efficiency, and the scattered writes go to
+        // only nChannelsGroup distinct rows that stay resident for the whole
+        // pass.
+        groupT_.resize( static_cast<size_t>( nChannelsGroup_ ) * nSamples );
+        float *out = groupT_.data();
+        for( size_t t = 0; t < nSamples; ++t ) {
+            const double *src = data + t * static_cast<size_t>( nChannelsGroup_ );
+            for( int ch = 0; ch < nChannelsGroup_; ++ch )
+                out[static_cast<size_t>( ch ) * nSamples + t] = static_cast<float>( src[ch] );
+        }
+    }
+
     dispatch();
 
     size_t total = 0;
@@ -268,4 +308,9 @@ void MultiConvolutionEngine::updateUnit( int unitIndex, const std::vector<int32_
     for( size_t i = 0; i < taps.size(); ++i )
         taps[i] = static_cast<double>( filter[i] );
     engines_[unitIndex] = ConvolutionEngine( L, nc, taps, minSeparationSamples_ );
+    if( fastPath_ ) {
+        fast_[unitIndex] = FastMatchedFilter( L, nc, filter.data(),
+                                              engines_[unitIndex].leftMargin(),
+                                              engines_[unitIndex].rightMargin() );
+    }
 }
