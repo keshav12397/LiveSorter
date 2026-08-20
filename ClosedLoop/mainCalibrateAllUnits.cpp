@@ -173,7 +173,7 @@ int main( int argc, char **argv )
         const int nCarCh = static_cast<int>( carChannelIds.size() );
 
         // ---- Preprocess the FULL recording once, shared across every unit --
-        std::cout << "Preprocessing (GPU causal highpass + CAR) -> " << scratchPath << "...\n";
+        std::cout << "Preprocessing (causal highpass + CAR) -> " << scratchPath << "...\n";
         long long nSamplesTotal = streamPreprocessToScratch(
             binPath, metaPath, carChannelIds, applyHighpass, highpassCutoffHz,
             /*maxSamples=*/0, preprocessChunkSamples, scratchPath );
@@ -441,7 +441,7 @@ int main( int argc, char **argv )
                 std::max( 20000, static_cast<int>( fits.size() ) * ( scoreChunkSamples / std::max( 1, minSep ) + 1 ) * 2 );
 
             std::cout << "Scoring " << fits.size() << " units over the held-out test split "
-                       << "(one GPU streaming pass, detectionCapacity=" << detectionCapacity << ")...\n";
+                       << "(one streaming pass, detectionCapacity=" << detectionCapacity << ")...\n";
             allPeaks = scoreAllUnitsOffline(
                 binPath, metaPath, carChannelIds, applyHighpass, highpassCutoffHz,
                 unitIdsInt, unitChannelsInCarGroup, unitFilters, templateLength, nChannels,

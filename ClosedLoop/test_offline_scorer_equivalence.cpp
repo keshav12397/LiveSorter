@@ -79,7 +79,7 @@ int main( int argc, char **argv )
     std::printf( "scoreAllUnitsOffline returned\n" ); std::fflush( stdout );
 
     const UnitPeaks &got = result[0];
-    std::printf( "GPU produced %zu peaks\n", got.sampleIdx.size() );
+    std::printf( "engine produced %zu peaks\n", got.sampleIdx.size() );
 
     // Build a sorted (sampleIdx -> score) map for the GPU output, match each
     // expected Python peak to the nearest GPU peak within a small window.
@@ -114,7 +114,7 @@ int main( int argc, char **argv )
     double matchFrac = nPeaksExpect > 0 ? static_cast<double>( matched ) / nPeaksExpect : 1.0;
     std::printf( "matched %d/%d expected peaks (%.4f%%), max matched score rel err = %.4e\n",
                  matched, nPeaksExpect, 100.0 * matchFrac, maxScoreErr );
-    std::printf( "peak count ratio (GPU/expected) = %.4f\n",
+    std::printf( "peak count ratio (engine/expected) = %.4f\n",
                  nPeaksExpect > 0 ? static_cast<double>( got.sampleIdx.size() ) / nPeaksExpect : 0.0 );
 
     if( matchFrac > 0.99 ) {

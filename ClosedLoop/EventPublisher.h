@@ -83,11 +83,13 @@ private:
     std::atomic<bool>      hasClient_;
     std::atomic<long long> nPublished_, nDropped_;
 
-    // uintptr_t rather than SOCKET so this header stays free of
-    // winsock2.h -- it is included by ImecFetchThreadCpu.cpp, and pulling
-    // the Windows socket headers into an nvcc translation unit invites the
-    // windows.h/min-max and winsock1-vs-2 include-order problems this
-    // project has no reason to take on.
+    // uintptr_t rather than SOCKET so this header stays free of winsock2.h.
+    // The original reason was that it is included from what was then an nvcc
+    // translation unit; nvcc is gone, but the reason to keep it is not.
+    // winsock2.h drags in windows.h, whose min/max macros break any header
+    // using std::min/std::max after it, and it must precede any windows.h
+    // that would otherwise pull in winsock 1 -- an include-order constraint
+    // that would propagate to every file including this one.
     unsigned long long listenSock_, clientSock_;
 
     std::atomic<bool> stopFlag_;

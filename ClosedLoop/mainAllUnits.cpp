@@ -1,7 +1,7 @@
 // =================================
 // ClosedLoopAllUnits: all-Kilosort-units, GPU-accelerated spike detection
 // driving the same syllable-triggered digital output ClosedLoop.exe drives.
-// See README.md's "All-units GPU detection" section.
+// See README.md's "All-units detection" section.
 //
 // Deliberately a SEPARATE executable from ClosedLoop.exe (main.cpp), not a
 // mode switch inside it -- the single-target path is the validated
@@ -296,7 +296,7 @@ int main( int argc, char **argv )
         // sample-accounting summary are not lost to an abrupt kill.
         int runDurationSec = cfg.getInt( "runDurationSec", 0 );
 
-        std::cout << "Starting all-units GPU detection. ";
+        std::cout << "Starting all-units detection. ";
         if( runDurationSec > 0 )
             std::cout << "Will stop automatically after " << runDurationSec << "s.\n";
         else

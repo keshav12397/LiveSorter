@@ -243,7 +243,7 @@ int main( int argc, char **argv )
         const int detectionCapacity = std::max( 20000,
             nUnits * ( scoreChunkSamples / (int)std::max( 1LL, minSep ) + 1 ) * 2 );
 
-        std::cout << "Scoring all units in one GPU pass...\n";
+        std::cout << "Scoring all units in one pass...\n";
         auto tScore0 = std::chrono::steady_clock::now();
         std::vector<UnitPeaks> peaks = scoreAllUnitsOffline(
             binPath, metaPath, carChannelIds,

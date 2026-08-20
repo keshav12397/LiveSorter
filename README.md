@@ -220,12 +220,60 @@ follows). This means:
 - Close/destroy all handles sequentially again at shutdown, after joining
   every thread.
 
-## All-units GPU detection
+## All-units detection
 
 A second, separate executable, `ClosedLoopAllUnits.exe` (`mainAllUnits.cpp`),
-detects **every** Kilosort unit in a session simultaneously on the GPU,
-rather than one hand-picked target on the CPU. Several source comments point
-at this section; this is it.
+detects **every** Kilosort unit in a session at once, rather than one
+hand-picked target. Several source comments point at this section; this is
+it.
+
+### There is no GPU any more, and the arithmetic says there never needed to be
+
+This pipeline was CUDA. It is not, and the reason is worth recording because
+the instinct to reach for a GPU here is strong and wrong.
+
+**We never convolve 384 channels.** LCMV selects a handful per unit --
+`filters.bin` is `(nUnits, 61, 5)` -- so the kernel's inner loop runs over 5
+or 6 channels, not the probe. 384 appears only in preprocessing, which is
+~130 MFLOP/s of highpass and median CAR. The whole 157-unit bank is:
+
+    157 units x 5 channels x 61 taps = 47,885 MAC/sample
+                          at 30 kHz  =  2.87 GFLOP/s
+
+Measured GPU cost was 3.20 us/sample, i.e. ~30 GFLOP/s achieved against
+~19 TFLOP/s of sm_80 peak: **0.15% utilisation**. That is not a compute
+workload, it is overhead with some arithmetic attached. `nmsDecideKernel` was
+the proof -- 157 blocks of ONE thread each, with ~106 KB of `MAX_CAND` local
+arrays living in device DRAM, which is the single most GPU-hostile shape a
+kernel can have.
+
+Do not reintroduce a GPU without re-measuring first. The crossover is real
+but distant: the bank has to grow by roughly 30x in `nUnits * nChannels`
+before the FLOPs alone justify one.
+
+### What it costs on CPU
+
+`bench_multi_convolution.exe` measures realtime factor (seconds of neural
+data per second of wall clock) rather than GFLOP/s, because on this workload
+the two disagree and only one decides whether a session keeps up:
+
+              units  chans   1 thread   12 threads
+                157      5      2.76x       12.65x
+                500      6      0.65x        3.60x
+               1000      6      0.35x        2.89x
+               2000      6      0.21x        1.48x
+
+Preprocessing (384 channels, highpass + median CAR, single-threaded) is a
+separate ~3.3x, and scales with channel count rather than unit count.
+
+`profile_detection_path.exe` says where the time goes, and is worth running
+before optimising anything here -- three successive guesses at the bottleneck
+were wrong before it was written. What it found: `std::fmaf` is not lowered
+to a `vfmadd` by this compiler, so a 6-output scalar tail cost more than the
+whole vectorised body; and MSVC sizes `std::deque` blocks in ELEMENTS (2 for
+`double`, 1 for a 16-byte pair), so the decision path was doing a malloc
+every couple of samples per unit. Fixing those took 1000 units from 0.73x to
+2.89x.
 
 It is deliberately a separate binary and not a mode switch inside
 `ClosedLoop.exe`. The single-target path is the validated production one and
@@ -234,7 +282,7 @@ stays untouched by work on this.
 **It is detection-only.** No `NiFetchThread`, no `DecisionThread`, no digital
 output, no calibration subprocess. Detections go to `spikeTimesPath` as
 `unit_id,sample_index,score` rows, where `unit_id` is the real Kilosort
-cluster id (via `GpuFilterBank::hostUnitIds`), not an internal array index.
+cluster id (via `MultiFilterBank::hostUnitIds`), not an internal array index.
 
 ### Pipeline
 
@@ -244,22 +292,47 @@ cluster id (via `GpuFilterBank::hostUnitIds`), not an internal array index.
    `filters.bin`, `thresholds.bin`) plus `summary.csv`. It reuses
    `generate_filter.py`/`threshold_sweep_real.py`'s functions directly --
    this repo has twice lost recall to a second, drifted reimplementation of
-   that math. There is also a C++/GPU equivalent, `CalibrateAllUnits.exe`
-   (`mainCalibrateAllUnits.cu`), for the same job without Python.
-2. `GpuFilterBank::load()` uploads all four arrays once at startup. Every
+   that math. There is also a C++ equivalent, `CalibrateAllUnits.exe`
+   (`mainCalibrateAllUnits.cpp`), for the same job without Python.
+2. `MultiFilterBank::load()` reads all four arrays once at startup. Every
    unit shares one `nChannelsPerUnit` and one `templateLength`; that fixed
-   stride is what lets the kernels index without a per-unit lookup.
-3. `ImecFetchThreadGPU` owns one handle (same one-handle-one-thread rule as
+   stride is what lets every consumer index without a per-unit lookup.
+3. `ImecFetchThreadCpu` owns one handle (same one-handle-one-thread rule as
    everything else here), fetches the full CAR group + SY channel, and hands
-   each chunk to `GpuPreprocessor` (highpass + CAR) then
-   `GpuConvolutionEngine` (batched matched filter + windowed NMS), which
-   score every unit in two kernel launches per chunk.
+   each chunk to `Preprocessor` (highpass + CAR) then
+   `MultiConvolutionEngine`, which scores every unit across a worker pool.
 
-`GpuConvolutionEngine` is a *port* of `ConvolutionEngine.cpp`, not a
-re-derivation, for the reason that file states about itself. Its one
-deliberate difference is that the device history buffer starts as a fixed
-`templateLength-1` zeros rather than replicating the CPU's variable-length
-ramp-up -- a bounded ~2 ms startup transient, never recurring.
+### MultiConvolutionEngine does not contain the algorithm
+
+It owns **one `ConvolutionEngine` per unit** and calls it. `ConvolutionEngine`
+records that this repo has twice silently lost recall to a
+re-derived-and-wrong version of its matched-filter/NMS math, so the safe
+option was taken: not "port it faithfully" but "call the original". What the
+class adds is the channel gather, the threshold comparison, and scheduling.
+
+The convolution itself is split out into `FastMatchedFilter` (samples -> D);
+`ConvolutionEngine::processPrecomputedD` still does D -> peaks, so the
+decision rule stays shared and untouched. `processChunk()` calls that same
+method, so there is exactly one copy of it.
+
+**`FastMatchedFilter` accumulates in float32, and that is a correctness
+choice before it is a speed one.** `calibrate_all_units.py` picks each
+threshold by scoring float32 filters against float32 data, and
+`generate_filter.filter_output()` says explicitly that the dtype must follow
+the input so a threshold is not "calibrated for a distribution the [online]
+path never actually produces". `ConvolutionEngine` is float64 because it
+serves the SINGLE-TARGET path, whose Python side writes float64 filters --
+a separate, internally consistent convention. Reusing it wholesale silently
+moved the all-units path off the precision its thresholds were chosen in.
+
+The float64 path is kept behind a constructor flag as the reference the
+float32 one is tested against. On 22,609 peaks they agree on every peak,
+with max relative score difference 1.47e-06 -- the predicted
+sqrt(L*nCh)*epsilon bound.
+
+**Determinism.** `processChunk()` sorts by `(sampleIndex, unitIndex)`, so
+output does not depend on worker count. Without that, a test would pass or
+fail by machine core count and no run would be reproducible from its config.
 
 ### Sample accounting -- read the shutdown summary
 
@@ -280,14 +353,13 @@ v20251218, measured). Falling that far behind is unrecoverable by
 construction, so watch `max backlog` in the summary long before it gets
 near. In practice there is enormous headroom: a 157-unit run against the
 live server processed 30.05 s of stream in a 30 s window with zero drops and
-a max backlog of 76 samples (2.5 ms), at ~10% GPU duty cycle.
+a max backlog of 76 samples (2.5 ms).
 
-`latencyLogPath` gives per-chunk GPU-pipeline timing.
-**Ignore chunk 0** -- it reliably reads ~200 ms against ~0.2 ms for
-everything after it, because the first launch of each kernel is what loads
-its module and reserves its local memory. It is not PTX JIT (a native cubin
-does not change it) and the ring absorbs it completely. Any *other* chunk
-over a millisecond is real.
+`latencyLogPath` gives per-chunk detection-pipeline timing. The GPU build's
+"ignore chunk 0, it reads ~200 ms" caveat is gone with the GPU -- that was
+each kernel's first launch loading its module and reserving local memory.
+There is no module to load, so chunk 0 is an ordinary chunk and every row of
+that log now means the same thing.
 
 ### Validating a run
 
@@ -320,7 +392,7 @@ that script's docstring for why that is also the better test article.
 ## Live viewer (SpikeViewer.exe)
 
 `ClosedLoopAllUnits.exe` is no longer detection-only. It runs the same three
-threads `ClosedLoop.exe` does -- `ImecFetchThreadGPU` + `NiFetchThread` +
+threads `ClosedLoop.exe` does -- `ImecFetchThreadCpu` + `NiFetchThread` +
 `DecisionThread` -- and publishes every event over a local TCP socket to
 `SpikeViewer.exe`, a Dear ImGui + ImPlot viewer (vendored in
 `third_party/`, no package manager, no network fetch at build time).
@@ -614,7 +686,7 @@ hands back events as their time arrives, and
 `GpuFilterBank::updateFilters()` overwrites one unit's slice in place --
 no reallocation, since the bank's dimensions are fixed at `load()`.
 
-**This is not wired into `ImecFetchThreadGPU` yet.** `DriftSchedule.h`
+**This is not wired into `ImecFetchThreadCpu` yet.** `DriftSchedule.h`
 documents the call-site addition, including why the channel-id translation
 must reuse that file's existing raw-id -> CAR-group mapping rather than
 duplicating it.
@@ -658,7 +730,7 @@ centroid, because the profile's ~30 um *shape* is what cross-correlation
 registers.
 
 Omitted relative to real DREDge: the online/streaming solver, robust
-(L1/Huber) reweighting, and the GPU paths. `--min-corr` is the only
+(L1/Huber) reweighting, and its GPU paths. `--min-corr` is the only
 robustness mechanism and it is blunt.
 
 ### What it cannot do
@@ -780,12 +852,22 @@ makes every build still link fine and then fail at launch with exit code
 existing `"build demo"` task's `cl.exe` invocation. Run via VS Code's
 "Tasks: Run Task", or from a Developer Command Prompt:
 
+Every binary now builds with `cl.exe`; nothing uses `nvcc`. `.vscode/tasks.json`
+has a task per executable ("build closed loop", "build closed loop all units",
+"build calibrate all units", "build offline replay", "build spike viewer").
+
+Build the all-units binary with `/arch:AVX2` -- `FastMatchedFilter`'s hot loop
+is AVX2 intrinsics behind `#if defined(__AVX2__)`, and without the flag it
+silently falls back to the scalar path, which is several times slower but
+produces identical results.
+
 ```
 cl.exe /EHsc /std:c++17 /Zi /Fe:ClosedLoop.exe ^
     ClosedLoop\main.cpp ClosedLoop\Config.cpp ClosedLoop\SglxMetaReader.cpp ^
     ClosedLoop\FilterBank.cpp ClosedLoop\ConvolutionEngine.cpp ^
     ClosedLoop\Calibration.cpp ClosedLoop\ImecFetchThread.cpp ^
     ClosedLoop\NiFetchThread.cpp ClosedLoop\DecisionThread.cpp ^
+    ClosedLoop\EventPublisher.cpp ^
     SDK\API\SglxCppClient.cpp ^
     /I SDK\API /I ClosedLoop ^
     /link /LIBPATH:SDK\API libSglxApi.a
