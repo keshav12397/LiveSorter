@@ -317,6 +317,77 @@ Syllable codes ride on the IMEC SY channel's bits 0-2 rather than the NI
 digital word, because the NI stream cannot be simulated on this setup. See
 that script's docstring for why that is also the better test article.
 
+## Live viewer (SpikeViewer.exe)
+
+`ClosedLoopAllUnits.exe` is no longer detection-only. It runs the same three
+threads `ClosedLoop.exe` does -- `ImecFetchThreadGPU` + `NiFetchThread` +
+`DecisionThread` -- and publishes every event over a local TCP socket to
+`SpikeViewer.exe`, a Dear ImGui + ImPlot viewer (vendored in
+`third_party/`, no package manager, no network fetch at build time).
+
+It keeps writing every CSV it wrote before. The socket is for watching a run
+happen; the CSVs are what a finished run is read from.
+
+### The wire
+
+One shared header, `ClosedLoop/LiveWire.h`, defines a 32-byte
+`SessionHeader` (magic/version/nUnits/sample rates/which syllable source)
+followed by the unit-id table, then a stream of 32-byte `WireRecord`s of
+four types: spike, syllable, trial, and DO-line transition. Both ends
+include that one header, so neither re-derives the format.
+
+**Publishing never blocks the fetch loop.** `EventPublisher` buffers into a
+ring and hands off to its own sender thread; if the viewer stalls, the ring
+drops oldest-first and *counts* the drops, and the fetch loop is unaffected.
+With no viewer attached, records are discarded rather than buffered -- a
+viewer joining mid-run should see the run from the moment it joined, not a
+burst of stale history. Measured at 0.141 us/record with a deliberately
+wedged reader.
+
+### Running it
+
+```
+SpikeViewer.exe --live [host:port]                  attach to a running session
+SpikeViewer.exe --csv <spikeTimes> [syllables] [decisions]    replay a finished run
+SpikeViewer.exe --unit <kilosort_id> --rate <Hz> --quit-after <seconds>
+```
+With no arguments it starts idle and you connect or open files from the
+Session panel; the switches exist so a run can be launched from a script.
+
+Views: a scrolling per-unit raster, rasters and PSTHs aligned to the digital
+trigger over a configurable window, syllable events with their codes on the
+same axis, and the DO line's state both live and as a per-trial attribute so
+trials can be split into triggered and not-triggered.
+
+### syllableSource -- READ THIS BEFORE A REAL EXPERIMENT
+
+`syllableSource=ni` (the default) is the production path: syllable codes
+come from the NI digital word's lines 5/6/7, exactly as before.
+
+`syllableSource=imecSy` is a **test-only** path that decodes codes from the
+IMEC SY word's bits 0-2 instead. It exists because a SpikeGLX simulation
+source can replay a synthetic IMEC file but cannot simulate an NI stream, so
+on a test rig the NI digital word is all zeros and the production path
+cannot be exercised at all. `FilterGen/make_sim_session.py` puts codes
+there; on real hardware those bits are error flags that stay 0, so nothing
+changes. Both binaries print a loud banner at startup saying which is
+active.
+
+**`syllableSource=ni` has never been exercised end to end on this codebase**
+-- no rig with a live NI digital word has been available. Everything
+downstream of the decoder (windowing, counting, the DO line, the viewer) is
+shared between both paths and is tested, but the NI decode itself is not.
+Confirm it on real hardware before trusting a closed-loop session.
+
+### decisionUnitIds
+
+`DecisionThread` used to count *any* spike, which is correct for one
+hand-picked target and meaningless across 157 units. `decisionUnitIds` names
+which Kilosort cluster ids drive the decision. Empty means "count
+everything", which preserves `ClosedLoop.exe`'s behaviour exactly; the
+all-units binary **requires** the key rather than defaulting it, since a
+default would be a silent choice of which neuron controls the stimulus.
+
 ## Building
 
 **`SglxApi.dll` must sit next to the built `.exe`.** The copy in the repo

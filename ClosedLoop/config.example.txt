@@ -130,3 +130,42 @@ latencyLogPath=D:/test_newsorter/latency_all_units.csv
 # at the right moment -- either way shutdown goes through stop()/join(), so
 # the last chunks and the sample-accounting summary are not lost.
 runDurationSec=0
+
+# ==========================================================================
+# Live viewer + full-loop keys (ClosedLoopAllUnits.exe only) -- see README's
+# "Live viewer (SpikeViewer.exe)" section.
+# ==========================================================================
+
+# Where syllable events come from.
+#   ni      PRODUCTION. NI digital word lines 5/6/7 (niSyllableLines above).
+#   imecSy  TEST ONLY. Decodes from the IMEC SY word's bits 0-2 instead.
+#           For rigs whose NI stream cannot be simulated -- the synthetic
+#           session from FilterGen/make_sim_session.py puts codes there. On
+#           real hardware those bits are error flags that stay 0.
+# The binary prints a loud banner at startup saying which one is active.
+syllableSource=ni
+
+# Which SY bits carry the 3-bit code when syllableSource=imecSy. Ignored for
+# syllableSource=ni. Must match make_sim_session.py's SYLLABLE_BITS.
+imecSyllableBits=0,1,2
+
+# Which Kilosort cluster ids may contribute to the decision count. REQUIRED
+# for ClosedLoopAllUnits.exe and has no default there on purpose: with 157
+# units on one queue, "any spike counts" is not a decision about anything,
+# and silently picking for you would be picking which neuron controls the
+# stimulus. ClosedLoop.exe (single target) ignores this and counts every
+# spike, exactly as it always did.
+decisionUnitIds=74
+
+# Machine-readable trial log, one row per CLOSED trial:
+#   syllable_sample_index,code,triggered,spike_count
+# decisionLogPath (above) stays a human-readable operator log -- parsing its
+# prose in the viewer would turn it into a wire format. Leave blank to skip.
+decisionCsvPath=D:/test_newsorter/trials.csv
+
+# Live viewer feed. The pipeline listens on this port and publishes events to
+# SpikeViewer.exe. Publishing never blocks the fetch loop: a slow or absent
+# viewer costs no sample throughput (records are dropped oldest-first and
+# counted). Set viewerEnabled=false to not open the socket at all.
+viewerEnabled=true
+viewerPort=4143
