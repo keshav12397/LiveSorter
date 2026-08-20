@@ -7,9 +7,9 @@
 // mode switch inside it -- the single-target path is the validated
 // production pipeline and stays untouched by work here.
 //
-// It was detection-only for its first phase (GpuFilterBank + one
-// ImecFetchThreadGPU, spikes to a CSV and nowhere else). It now runs the
-// full loop: ImecFetchThreadGPU + NiFetchThread + DecisionThread, the latter
+// It was detection-only for its first phase (MultiFilterBank + one
+// ImecFetchThreadCpu, spikes to a CSV and nowhere else). It now runs the
+// full loop: ImecFetchThreadCpu + NiFetchThread + DecisionThread, the latter
 // two reused as-is from main.cpp, plus an EventPublisher feeding
 // SpikeViewer.exe. Still no Python calibration subprocess -- filters come
 // from FilterGen/calibrate_all_units.py, run offline ahead of time.
@@ -20,7 +20,7 @@
 //   production and is exactly main.cpp's path (NiFetchThread on its own
 //   handle, decoding the NI digital word). `imecSy` is a TEST path for a rig
 //   whose NI stream cannot be simulated; it decodes the codes out of the
-//   IMEC SY word ImecFetchThreadGPU already fetches, and creates no NI
+//   IMEC SY word ImecFetchThreadCpu already fetches, and creates no NI
 //   handle and no NI thread at all.
 //
 //   decisionUnitIds -- which units may drive the decision. Counting "any of
@@ -45,8 +45,8 @@
 #include "Config.h"
 #include "Events.h"
 #include "ThreadSafeQueue.h"
-#include "GpuFilterBank.h"
-#include "ImecFetchThreadGPU.h"
+#include "MultiFilterBank.h"
+#include "ImecFetchThreadCpu.h"
 #include "NiFetchThread.h"
 #include "DecisionThread.h"
 #include "EventPublisher.h"
@@ -141,7 +141,7 @@ int main( int argc, char **argv )
         int         templateLength   = cfg.getInt( "templateLength", 61 );
 
         std::cout << "Loading multi-unit filter bank from " << filterDir << "...\n";
-        GpuFilterBank filterBank = GpuFilterBank::load( filterDir, nChannelsPerUnit, templateLength );
+        MultiFilterBank filterBank = MultiFilterBank::load( filterDir, nChannelsPerUnit, templateLength );
         std::cout << "Loaded " << filterBank.nUnits << " units ("
                    << nChannelsPerUnit << " channels/unit, templateLength=" << templateLength << ")\n";
 
@@ -217,7 +217,7 @@ int main( int argc, char **argv )
         ThreadSafeQueue<SpikeEvent>    spikeQueue;
         ThreadSafeQueue<SyllableEvent> syllableQueue;
 
-        ImecFetchThreadGPU::SyllableFromSy syFromSy;
+        ImecFetchThreadCpu::SyllableFromSy syFromSy;
         if( useImecSy ) {
             std::vector<int> bits = cfg.getIntList( "imecSyllableBits" );
             if( bits.empty() ) {
@@ -236,7 +236,7 @@ int main( int argc, char **argv )
             syFromSy.syllableTimesPath = cfg.getString( "syllableTimesPath", "" );
         }
 
-        ImecFetchThreadGPU imecThread(
+        ImecFetchThreadCpu imecThread(
             hIM, filterBank,
             carChannelMapJson, applyHighpass, highpassCutoffHz,
             cfg.getInt( "imecSyncBit", 6 ),
