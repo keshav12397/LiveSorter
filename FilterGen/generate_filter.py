@@ -615,6 +615,56 @@ def filter_output(data_sel, f):
     return D
 
 
+def detection_lag(f, target_template_sel, template_offset):
+    """Samples between a spike's Kilosort time and the peak filter_output()
+    produces for it. Positive means the detector fires late.
+
+    Derived from filter_output()'s own convention rather than measured, so
+    it costs nothing and cannot disagree with it. With L = template_length,
+    `np.convolve(x, f[::-1], mode='same')` gives
+
+        D[n] = sum_m f[m] * x[n - L//2 + m]
+
+    and mean_waveform() defines the template by x[t - template_offset + k]
+    = s[k] for a spike at t. Substituting,
+
+        D[t + d] = sum_m f[m] * s[m + d - (L//2 - template_offset)]
+
+    so the response peaks at d = (L//2 - template_offset) + argmax_l
+    <f, s shifted by l>. For a plain matched filter (f proportional to s)
+    that argmax is 0 and the whole lag is the fixed L//2 - template_offset
+    the README describes. LCMV's f is s whitened by R^-1 and constrained to
+    null its neighbours, and that filter is *not* generally aligned with s:
+    on D:/sim_validate this term alone ranges over -24..+8 samples across
+    twelve units, so the total lag ranges -14..+18.
+
+    That matters because validation matches detections to ground truth
+    within +/- template_length//4 (15 samples at L=61). A unit whose lag
+    exceeds that window scores near zero recall at *every* threshold while
+    detecting perfectly well -- and since best-F1 threshold selection is
+    driven by that same scoring, an uncorrected sweep also picks the wrong
+    threshold to deploy. See this branch's commit log for the two units this
+    was found on.
+
+    Verified against measurement in that same session: predicted lag equals
+    the median empirical detection-minus-truth offset exactly for 10 of 12
+    units and within 3 samples for the two whose lag sits past the matching
+    window (where the empirical median saturates, since a neighbouring peak
+    becomes the nearest one).
+    """
+    f = np.asarray(f, dtype=np.float64)
+    s = np.asarray(target_template_sel, dtype=np.float64)
+    L = f.shape[0]
+    lags = np.arange(-(L - 1), L)
+    corr = np.empty(lags.size)
+    for i, l in enumerate(lags):
+        if l >= 0:
+            corr[i] = np.sum(f[:L - l] * s[l:])
+        else:
+            corr[i] = np.sum(f[-l:] * s[:L + l])
+    return int(lags[int(np.argmax(corr))]) + (L // 2 - template_offset)
+
+
 def compute_threshold(D, all_spike_times, template_length, template_offset, k=5.0):
     """Empirically-calibrated threshold, appropriate for an LCMV filter.
 

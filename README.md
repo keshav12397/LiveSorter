@@ -388,6 +388,112 @@ everything", which preserves `ClosedLoop.exe`'s behaviour exactly; the
 all-units binary **requires** the key rather than defaulting it, since a
 default would be a silent choice of which neuron controls the stimulus.
 
+## Drift-aware filters
+
+Neurons move relative to the probe over a recording. A unit's peak channel
+migrates and its peak amplitude changes, so a filter fit from a
+whole-session mean waveform is fit to a *smeared* template and
+underperforms. `FilterGen/calibrate_drift_aware.py` is the drift-aware
+counterpart to `calibrate_all_units.py`.
+
+It does not reimplement any fit or sweep math -- it calls
+`threshold_sweep_real.fit_lcmv` and `sweep_thresholds` like every other
+driver here, for the reason those modules state about themselves.
+
+### Two modes
+
+- **`--mode segmented`** cuts the session into segments per unit (from an
+  estimated drift trajectory) and fits each segment's filter from that
+  segment's own spikes. Sharp templates, but each segment gets roughly
+  1/K of the unit's spikes -- which is why `--min-spikes-per-segment`
+  exists. Segmenting too finely produces a noisier template than a mildly
+  smeared one.
+- **`--mode registered`** keeps every spike instead: it registers the
+  unit's whole trajectory onto each segment's position before averaging
+  (`motion_correct.py`), so the template is sharp at that position while
+  still drawing on the full spike count.
+- **`--mode global`** is the control -- one filter per unit, the ordinary
+  fit, run under this script's own train/test protocol so a comparison
+  isolates segmentation from everything else. **Use this, not
+  `calibrate_all_units.py`'s output, as the baseline for any drift
+  comparison** (see "Comparing against a baseline" below).
+
+`--mode both` / `--mode all` run several in one pass over the data.
+
+Segmentation is the mode to use. Registration is kept because it is a
+genuinely different mechanism that may matter on faster drift or sparser
+units, but it has not beaten segmentation on the data tested.
+
+### The trajectory, and channel-id distance
+
+Drift is estimated per unit by binning its spikes, taking each bin's mean
+waveform, and tracking the waveform's centre of mass along the probe's
+depth axis. `--smooth` applies a running *median*, not a mean: an abrupt
+drift step is a step function, and a mean smears it across the window --
+which is exactly the boundary the segmenter has to find.
+
+**Channel-id distance is not depth distance.** A real channel map stitches
+together non-contiguous banks: `shank1only.json`'s `chanMap` steps by +1
+for most of its length and by +49 twice. Two channels 15 um apart can have
+SpikeGLX ids 49 apart, so a unit crossing a seam appears to jump ~50
+channels while physically moving one row. Anything treating drift as a
+distance must use microns or a depth-ordered index, never the raw id.
+
+### Detection lag -- a real bug this work uncovered
+
+The LCMV filter's response to its own target **does not peak at the spike
+time**. `generate_filter.detection_lag()` derives the offset from
+`filter_output()`'s own convention rather than measuring it. For a plain
+matched filter the lag is the fixed `L//2 - template_offset` the
+"Detected-spike sample-time convention" section describes, but LCMV's
+filter is the template whitened by R^-1 and constrained to null its
+neighbours, and that is not generally aligned with the template. Measured
+across twelve units the extra term alone ranged -24..+8 samples, for a
+total lag of -14..+18.
+
+That matters because validation matches detections to ground truth within
++/- `template_length//4` (15 samples at L=61). A unit whose lag exceeds the
+window scores near-zero recall at *every* threshold while detecting
+perfectly -- and worse, the best-F1 search then picks a threshold off that
+meaningless curve. `calibrate_all_units.py` now subtracts the lag, putting
+detections back on Kilosort's own sample convention, and reports it as a
+`detection_lag` column in `summary.csv`.
+
+This affects the ordinary single-target and all-units calibration paths,
+not just drift work. **Filter banks calibrated before this fix may carry
+thresholds chosen from a corrupted sweep for high-lag units.** Recalibrate.
+
+### Comparing against a baseline
+
+Use `--mode global` from this same script. Comparing a drift mode against
+`calibrate_all_units.py`'s output instead confounds segmentation with the
+detection-lag fix above, which lands in both -- doing exactly that once
+inflated segmentation's apparent benefit several-fold.
+
+Two further cautions, both learned the expensive way:
+
+- **Do not evaluate a segmentation method on a short recording.** On a
+  300 s session, segments are starved of spikes and segmentation looks
+  nearly worthless; the effect is much larger over 30 minutes. Duration is
+  a confound, not a detail.
+- **Do not band results by `n_train_spikes` across sessions of different
+  length.** The same spike count means a different firing rate at a
+  different duration.
+
+### Deploying a drift schedule online
+
+`calibrate_drift_aware.py` writes `drift_schedule.bin` alongside the usual
+packed filter files: a time-ordered list of (time, unit, new
+channels/filter/threshold) events. `ClosedLoop/DriftSchedule.h` loads it and
+hands back events as their time arrives, and
+`GpuFilterBank::updateFilters()` overwrites one unit's slice in place --
+no reallocation, since the bank's dimensions are fixed at `load()`.
+
+**This is not wired into `ImecFetchThreadGPU` yet.** `DriftSchedule.h`
+documents the call-site addition, including why the channel-id translation
+must reuse that file's existing raw-id -> CAR-group mapping rather than
+duplicating it.
+
 ## Building
 
 **`SglxApi.dll` must sit next to the built `.exe`.** The copy in the repo
