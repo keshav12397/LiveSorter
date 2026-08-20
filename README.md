@@ -400,7 +400,32 @@ It does not reimplement any fit or sweep math -- it calls
 `threshold_sweep_real.fit_lcmv` and `sweep_thresholds` like every other
 driver here, for the reason those modules state about themselves.
 
-### RESULT: the drift modes do not help. The detection-lag fix did.
+### SCOPE WARNING on the result below
+
+The measurement in this subsection was made on a session whose drift model
+was wrong in a way that limits what the numbers can mean, and it is being
+re-run. Read it with both of these in mind:
+
+1. **The drift was independent per unit.** `make_sim_session.py` gave each
+   drifting unit its own direction, magnitude, shape and timing, so units
+   30 um apart moved opposite ways. Real drift is common-mode -- the tissue
+   slides and carries the population with it. A session built the old way
+   cannot evaluate any pooled estimator at all (see "Pooled motion
+   estimation" below), and it also understates how *correlated* a real
+   drift penalty is across units.
+2. **The train/test split was interleaved.** `calibrate_drift_aware.py`
+   cuts the session into cells and trains on the first part of every cell,
+   so the control's training data spans the whole trajectory. That measures
+   interpolation. The case that motivates drift-aware filters is
+   extrapolation: calibrate once, then run for hours while the unit walks
+   away. `calibrate_all_units.py`'s chronological split is the right
+   geometry for that question.
+
+The detection-lag finding below is unaffected by either point -- it is a
+bug in how detections were matched to ground truth, not a claim about
+drift -- and it stands.
+
+### RESULT (on the model described in the scope warning above)
 
 Measured on a 30 minute / 160 unit synthetic session with known drift, all
 modes run under one protocol so nothing but the mode differs, amplitude
@@ -430,7 +455,7 @@ window far more often than a fixed one. The bug therefore punished drifting
 units specifically, which looks exactly like a drift penalty and is not one.
 
 **So: use the detection-lag fix, and do not deploy the drift modes on data
-like this.** The remaining 0.022 penalty is close to the noise between
+like this** -- where "like this" now carries the scope warning above. The remaining 0.022 penalty is close to the noise between
 subgroups. The segmented/registered code is kept because a negative result
 is only meaningful alongside the code that produced it, and because faster
 drift or sparser units than this session contains might still favour it --
@@ -534,6 +559,104 @@ no reallocation, since the bank's dimensions are fixed at `load()`.
 documents the call-site addition, including why the channel-id translation
 must reuse that file's existing raw-id -> CAR-group mapping rather than
 duplicating it.
+
+## Pooled motion estimation (dredge_lite.py)
+
+`FilterGen/dredge_lite.py` estimates probe-wide motion by decentralized
+registration -- a small version of DREDge (Windolf et al.,
+https://github.com/evarol/dredge), specialised to being downstream of a
+sorter.
+
+### Why pooling, rather than a better per-unit tracker
+
+`drift_estimate.unit_trajectory` follows each unit's own amplitude centroid.
+A unit firing at 1.5 Hz puts ~90 spikes in a 60 s bin, and the centroid of a
+90-spike average wanders several microns on noise alone -- against a drift
+signal of ~30 um over a session. Smoothing does not fix that; it trades the
+noise for the lag that makes an abrupt step unfindable.
+
+Pooling does fix it, because **drift is common-mode**. The tissue slides
+along the shank and takes the whole population with it, so N units are not
+N problems but N noisy votes on one trajectory, worth about sqrt(N).
+
+"Decentralized" specifically means no reference bin is privileged: every
+*pair* of time bins is cross-correlated to give a displacement D_ij and a
+confidence w_ij, and one trajectory is then solved for that best explains
+all pairs at once. A pair that could not be compared reliably gets a low
+weight instead of corrupting the answer, which is what a
+measure-everything-against-bin-0 scheme cannot do once the probe has moved
+far enough that bin 0 no longer overlaps the present.
+
+### What being downstream of a sorter buys
+
+DREDge's AP mode must *localize* each individual spike before it can build
+its raster. We already know which spikes belong to which unit, so a unit's
+spikes can be averaged within a time bin *before* anything is measured. The
+raster here is built from per-unit per-bin mean-waveform amplitude profiles
+instead: the same raster, far better SNR per entry, and no localizer to
+tune. The full per-channel profile is kept rather than collapsed to a
+centroid, because the profile's ~30 um *shape* is what cross-correlation
+registers.
+
+Omitted relative to real DREDge: the online/streaming solver, robust
+(L1/Huber) reweighting, and the GPU paths. `--min-corr` is the only
+robustness mechanism and it is blunt.
+
+### What it cannot do
+
+It recovers the common-mode trajectory and nothing else. A unit genuinely
+moving relative to its neighbours is not in the raster's shared structure.
+`sim_truth.npz` therefore stores `probe_offset_um` separately from
+`drift_position_um`, so a pooled estimator is scored on the quantity it
+models rather than charged for one it does not.
+
+### Simulating coherent drift
+
+`make_sim_session.py --probe-drift-um 30` gives every unit the same ramp --
+the ~2-channel settling of an ordinary day-long recording. `--probe-jumps`
+adds abrupt probe-wide steps on top (kept separate from the ramp because
+slow settling and steps break different things: a slow tracker follows the
+ramp fine and lags the step badly), and `--probe-nonrigid-gain` makes the
+motion depth-dependent, which is the first-order term of any smooth
+nonrigid field. `--n-drifting` still exists and now means per-unit motion
+*relative to the tissue*, layered on top.
+
+With no `--probe-drift-um` the generator is bit-for-bit what it was, so
+older sessions remain reproducible.
+
+**A geometry note that is easy to get wrong.** A 30 um ramp does not give a
+30 um train/test displacement under a half/half chronological split. The
+train half's mean position and the test half's mean position differ by half
+the total span -- 15 um, one channel. Ask for twice the drift you want to
+test, or compare against a late window rather than the test mean.
+
+### Two bugs the tests caught
+
+`test_dredge_lite.py` runs against synthetic rasters with known
+trajectories, so a failure there is a bug in the algebra rather than a
+statement about data. Both of these produced plausible-looking wrong
+trajectories rather than obvious breakage:
+
+- **The sign of `b` in the normal equations.** `D` is antisymmetric, so both
+  gradient sums collapse to the same `+D_kj` form and the term lands on the
+  opposite side from where it looks like it should; the solve returned
+  `-p`. The uniform-weight closed form `p_k = mean_j D_jk` is asserted
+  directly for exactly this reason.
+- **Correlation normalization under shift.** Normalizing each column once
+  and then zeroing whatever a shift pushes off the probe end leaves the
+  denominator sized for the full column while the numerator has lost rows,
+  penalising large shifts in proportion to their size and shrinking every
+  displacement toward zero. Scoring each shift on its overlapping range
+  only improved every test at once (rigid 30 um ramp 0.76 -> 0.04 um;
+  narrowest nonrigid window 4.36 -> 0.59 um). The bias is invisible on a
+  long probe with small drift and obvious on a narrow nonrigid window.
+
+### Running it
+
+`python dredge_lite.py --ks-dir ... --bin-path ... --channel-map-json ...
+--truth sim_truth.npz` scores this estimator and
+`drift_estimate.unit_trajectory` on the same recording, against both truths.
+`--n-windows 1` is rigid; more is nonrigid.
 
 ## Building
 
