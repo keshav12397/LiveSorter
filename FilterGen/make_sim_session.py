@@ -103,7 +103,7 @@ as long as the same cut is used on both sides.
 
 Example
 -------
-    python make_sim_session.py \
+    python make_sim_session.py \\
         --out-dir D:/sim_session \\
         --channel-map-json D:/test_newsorter/rawData/shank1only.json \\
         --duration-s 1800 \\
