@@ -10,6 +10,8 @@
 #include "ThreadSafeQueue.h"
 #include "Events.h"
 
+class EventPublisher;
+
 // Owns exactly one SpikeGLX handle (hNI) -- see README.md's concurrency
 // rules. Continuously fetches the NI digital-word (DW) channel, decodes a
 // debounced 3-bit syllable code from `syllableLines` (assumed contiguous
@@ -24,10 +26,14 @@
 class NiFetchThread {
 public:
     // syllableTimesPath: pass "" to skip writing this file (queue-only).
+    // publisher: optional live viewer feed (see EventPublisher.h). nullptr
+    // -- the default, and what ClosedLoop.exe passes -- means this thread
+    // behaves exactly as it did before the viewer existed.
     NiFetchThread( void *hSglx, int niSyncBit, const std::vector<int> &syllableLines,
                    int debounceSamples, int fetchChunkMs,
                    ThreadSafeQueue<SyllableEvent> &syllableQueue,
-                   const std::string &syllableTimesPath = "" );
+                   const std::string &syllableTimesPath = "",
+                   EventPublisher *publisher = nullptr );
 
     void start();
     void stop();
@@ -43,6 +49,7 @@ private:
     int   fetchChunkMs_;
     ThreadSafeQueue<SyllableEvent> &syllableQueue_;
     std::string syllableTimesPath_;
+    EventPublisher *publisher_;
 
     std::atomic<bool> stopFlag_;
     std::thread        thread_;

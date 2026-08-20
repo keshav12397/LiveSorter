@@ -7,4 +7,8 @@
 *.bin
 *.pyc
 *.tsv
-*.meta*.log
+*.meta
+*.log
+# ImGui's window-layout cache, written next to whatever .exe launched it --
+# per-machine/per-session state, not something to commit.
+imgui.ini

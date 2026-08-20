@@ -17,6 +17,8 @@
 #include "GpuPreprocessor.h"
 #include "GpuConvolutionEngine.h"
 #include "StreamAccountant.h"
+#include "SyllableDecoder.h"
+#include "EventPublisher.h"
 
 namespace {
     const int kImecJs = 2;
@@ -29,12 +31,17 @@ ImecFetchThreadGPU::ImecFetchThreadGPU( void *hSglx, const GpuFilterBank &filter
                                          bool applyHighpass, double highpassCutoffHz,
                                          int imecSyncBit, int fetchChunkMs,
                                          const std::string &spikeTimesPath,
-                                         const std::string &latencyLogPath )
+                                         const std::string &latencyLogPath,
+                                         ThreadSafeQueue<SpikeEvent> *spikeQueue,
+                                         EventPublisher *publisher,
+                                         const SyllableFromSy &syllableFromSy )
     :   hSglx_( hSglx ), filterBank_( filterBank ),
         carChannelMapJsonPath_( carChannelMapJsonPath ),
         applyHighpass_( applyHighpass ), highpassCutoffHz_( highpassCutoffHz ),
         imecSyncBit_( imecSyncBit ), fetchChunkMs_( fetchChunkMs ),
         spikeTimesPath_( spikeTimesPath ), latencyLogPath_( latencyLogPath ),
+        spikeQueue_( spikeQueue ), publisher_( publisher ),
+        syllableFromSy_( syllableFromSy ),
         stopFlag_( false )
 {}
 
@@ -73,6 +80,19 @@ void ImecFetchThreadGPU::fetchLoop()
         else
             latencyLogFile << "chunk_index,n_samples,latency_ms\n";
     }
+    // Same `code,sampleIndex` format NiFetchThread writes, deliberately:
+    // the viewer's offline reader then has one syllable-CSV parser rather
+    // than one per source. Only opened on the imecSy test path -- on the
+    // production path NiFetchThread owns this file.
+    std::ofstream syllableTimesFile;
+    if( syllableFromSy_.enabled && !syllableFromSy_.syllableTimesPath.empty() ) {
+        syllableTimesFile.open( syllableFromSy_.syllableTimesPath.c_str(), std::ios::app );
+        if( !syllableTimesFile.is_open() ) {
+            std::cerr << "ImecFetchThreadGPU: could not open '"
+                      << syllableFromSy_.syllableTimesPath << "' for writing\n";
+        }
+    }
+
     long long chunkIndex = 0;
 
     double sampleRate = sglx_getStreamSampleRate( hSglx_, kImecJs, kImecIp );
@@ -155,6 +175,13 @@ void ImecFetchThreadGPU::fetchLoop()
     GpuConvolutionEngine engine( filterBank_, nCarChans, maxChunkSamples, minSep );
     SyncEdgeTracker syncTracker( sampleRate );
 
+    // The SAME debounce state machine NiFetchThread runs, not a second one
+    // written to match it (SyllableDecoder.h was extracted from that loop
+    // for exactly this). Constructed unconditionally because it is ~40 bytes
+    // and costs nothing unused; it is only fed when enabled.
+    SyllableDecoder syllableDecoder( syllableFromSy_.startBit, syllableFromSy_.width,
+                                      syllableFromSy_.debounceSamples );
+
     // Pinned host staging buffer for the CAR-group-only (SY stripped)
     // portion of each fetch -- this is the fastest the SDK allows (see
     // README.md's "fetch directly to GPU" note): sglx_fetch can only fill a
@@ -178,6 +205,11 @@ void ImecFetchThreadGPU::fetchLoop()
     // where it would immediately age out again.
     const long long ringDepthSamples     = static_cast<long long>( 8.0 * sampleRate );
     const long long resyncBackoffSamples = static_cast<long long>( 0.75 * ringDepthSamples );
+
+    // Reused across chunks so the fan-out below never allocates inside the
+    // fetch loop. Reserve one chunk's worst case: every unit firing once.
+    std::vector<livewire::WireRecord> wireBatch;
+    wireBatch.reserve( static_cast<size_t>( filterBank_.nUnits ) );
 
     StreamAccountant acct;
     // Backlog costs an extra round-trip to ask for, so sample it
@@ -289,9 +321,46 @@ void ImecFetchThreadGPU::fetchLoop()
             for( int c = 0; c < nCarChans; ++c )
                 dst[c] = src[c];
 
-            short syValue = src[nFetchChans - 1];
-            int   syBit   = extractBit( syValue, imecSyncBit_ );
-            syncTracker.update( syBit, static_cast<long long>( headCt ) + t );
+            short     syValue = src[nFetchChans - 1];
+            long long syIdx   = static_cast<long long>( headCt ) + t;
+            int       syBit   = extractBit( syValue, imecSyncBit_ );
+            syncTracker.update( syBit, syIdx );
+
+            // Cost when disabled is one predictable branch per sample, which
+            // does not register against the per-sample channel copy directly
+            // above it; when enabled it adds a shift/mask and a few integer
+            // compares. Neither is a syscall, an allocation, or a lock, so
+            // this stays clear of the rule that removed per-chunk flushes
+            // from this loop.
+            if( syllableFromSy_.enabled ) {
+                int       code     = 0;
+                long long onsetIdx = 0;
+                if( syllableDecoder.update( syValue, syIdx, code, onsetIdx )
+                    && syncTracker.hasEdge() ) {
+
+                    SyllableEvent ev;
+                    ev.code         = code;
+                    ev.sampleIndex  = onsetIdx;
+                    ev.timeRelSyncS = syncTracker.secondsSinceLastEdge( onsetIdx );
+
+                    if( syllableFromSy_.queue )
+                        syllableFromSy_.queue->push( ev );
+
+                    if( syllableTimesFile.is_open() )
+                        syllableTimesFile << ev.code << "," << ev.sampleIndex << "\n";
+
+                    if( publisher_ ) {
+                        // kStreamImec, not kStreamNi: these codes are on the
+                        // IMEC clock, and mislabelling that would put the
+                        // viewer back into a cross-stream alignment guess
+                        // for events that need none.
+                        publisher_->publish( livewire::makeRecord(
+                            livewire::kWireSyllable, livewire::kStreamImec,
+                            ev.code, ev.sampleIndex, 0.0f,
+                            static_cast<float>( ev.timeRelSyncS ) ) );
+                    }
+                }
+            }
         }
 
         CUDA_CHECK( cudaMemcpy( d_rawChunk, hostCarChunk,
@@ -317,12 +386,48 @@ void ImecFetchThreadGPU::fetchLoop()
         }
         ++chunkIndex;
 
-        if( spikeTimesFile.is_open() && !detections.empty() ) {
+        if( !detections.empty() ) {
+
+            // One reusable buffer, filled per chunk and published in a
+            // single batched call, so the publisher's mutex is taken once
+            // per chunk rather than once per spike.
+            wireBatch.clear();
+
             for( size_t d = 0; d < detections.size(); ++d ) {
+
                 int unitId = filterBank_.hostUnitIds[detections[d].unitIndex];
-                spikeTimesFile << unitId << "," << detections[d].sampleIndex
-                                << "," << detections[d].score << "\n";
+
+                if( spikeTimesFile.is_open() ) {
+                    spikeTimesFile << unitId << "," << detections[d].sampleIndex
+                                    << "," << detections[d].score << "\n";
+                }
+
+                // timeRelSyncS is what DecisionThread compares against a
+                // syllable's own; leave it 0 until the first sync edge and
+                // let DecisionThread see a spike it cannot place rather than
+                // throwing a startup exception out of the fetch loop.
+                double relS = syncTracker.hasEdge()
+                              ? syncTracker.secondsSinceLastEdge( detections[d].sampleIndex )
+                              : 0.0;
+
+                if( spikeQueue_ ) {
+                    SpikeEvent ev;
+                    ev.timeRelSyncS = relS;
+                    ev.sampleIndex  = detections[d].sampleIndex;
+                    ev.unitId       = unitId;   // real Kilosort cluster id -- see Events.h
+                    spikeQueue_->push( ev );
+                }
+
+                if( publisher_ ) {
+                    wireBatch.push_back( livewire::makeRecord(
+                        livewire::kWireSpike, livewire::kStreamImec,
+                        unitId, detections[d].sampleIndex,
+                        detections[d].score, static_cast<float>( relS ) ) );
+                }
             }
+
+            if( publisher_ && !wireBatch.empty() )
+                publisher_->publish( &wireBatch[0], wireBatch.size() );
         }
 
         fromCt = headCt + static_cast<t_ull>( tpts );
@@ -338,6 +443,8 @@ void ImecFetchThreadGPU::fetchLoop()
     spikeTimesFile.flush();
     if( latencyLogFile.is_open() )
         latencyLogFile.flush();
+    if( syllableTimesFile.is_open() )
+        syllableTimesFile.flush();
 
     std::cout << "\n" << acct.summary( "IMEC", sampleRate );
     if( !acct.balanced() || acct.nDropped > 0 ) {
