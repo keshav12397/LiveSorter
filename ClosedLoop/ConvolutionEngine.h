@@ -2,7 +2,7 @@
 #define CLOSEDLOOP_CONVOLUTIONENGINE_H
 
 #include <vector>
-#include <deque>
+#include "RingDeque.h"
 #include <utility>
 #include <cstdint>
 
@@ -135,7 +135,19 @@ private:
     // comment in ConvolutionEngine.cpp. dBuffer_[i] is the D value at
     // absolute sample index (dBufferStartAbsIndex_ + i); only meaningful
     // while dBuffer_ is non-empty.
-    std::deque<double> dBuffer_;
+    // Per-call scratch for decideUpTo(), held as members ONLY so their
+    // capacity survives between calls. decideUpTo runs once per chunk per
+    // unit -- 200 times a second per unit live -- and building four fresh
+    // vectors each time made the decision phase allocation-bound: profiling
+    // measured 30 heap allocations per unit-chunk and 72% of total runtime
+    // in that phase, against a candidate list that is typically ~50 entries.
+    // They are cleared, never read across calls; nothing here is state.
+    std::vector<long long> candPos_;
+    std::vector<double>    candVal_;
+    std::vector<bool>      keep_;
+    std::vector<size_t>    order_;
+
+    RingDeque<double> dBuffer_;
     long long          dBufferStartAbsIndex_;
 
     long long           lastDecidedAbsIndex_;   // last sample index already accept/reject-decided
@@ -148,7 +160,7 @@ private:
     // loses the context that originally justified keeping them, causing
     // occasional incorrect decisions for nearby new candidates). Ascending
     // by position; trimmed the same way dBuffer_ is.
-    std::deque<std::pair<long long, double> > recentKeptPeaks_;
+    RingDeque<std::pair<long long, double> > recentKeptPeaks_;
 };
 
 #endif // CLOSEDLOOP_CONVOLUTIONENGINE_H

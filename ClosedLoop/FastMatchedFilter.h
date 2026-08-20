@@ -203,6 +203,36 @@ public:
                 for( int j = 0; j < 8; ++j )
                     dOut[idx + j] = static_cast<double>( tmp[j] );
             }
+
+            // Final remainder as ONE OVERLAPPING 8-wide block ending at nD,
+            // recomputing up to 7 outputs that were already written. The
+            // recomputation is exactly free of consequence -- same inputs,
+            // same order, same fused ops, so it stores the identical bits --
+            // and it keeps the scalar path out of the steady state entirely.
+            //
+            // That matters much more than 7 outputs suggests. The scalar tail
+            // has to use std::fmaf to match the vector path's single rounding,
+            // and profiling showed fmaf is not lowered to a vfmadd here: it is
+            // a real call, and 6 leftover outputs x 366 taps of it cost more
+            // than the entire vectorised body. Guessing would never have found
+            // that; it looked like six samples of arithmetic.
+            if( idx < nD && nD >= 8 ) {
+                const size_t start = nD - 8;
+                __m256 a0 = _mm256_setzero_ps();
+                for( int c = 0; c < nCh_; ++c ) {
+                    const float *s = chan_[c].data() + start;
+                    const float *f = taps_.data() + c;
+                    for( int k = 0; k < L; ++k ) {
+                        const __m256 w = _mm256_set1_ps( f[static_cast<size_t>( k ) * nCh_] );
+                        a0 = _mm256_fmadd_ps( w, _mm256_loadu_ps( s + k ), a0 );
+                    }
+                }
+                float tmp[8];
+                _mm256_storeu_ps( tmp, a0 );
+                for( int j = 0; j < 8; ++j )
+                    dOut[start + j] = static_cast<double>( tmp[j] );
+                idx = nD;
+            }
 #endif
             // Scalar tail -- and the entire loop on a target without AVX2.
             //

@@ -84,13 +84,18 @@ namespace {
 // stable-sort order, i.e. earlier array position wins the ascending sort
 // and so is processed LAST/first-eliminated among equal heights -- measure-
 // zero for real floating-point matched-filter output, not specially tested).
-std::vector<bool> selectByDistance( const std::vector<long long> &positions,
-                                     const std::vector<double> &heights,
-                                     long long distance )
+// `keep` and `order` are caller-owned scratch, reused across calls so this
+// allocates nothing in steady state; `keep` is the output. Otherwise a
+// verbatim port -- see above.
+void selectByDistance( const std::vector<long long> &positions,
+                        const std::vector<double> &heights,
+                        long long distance,
+                        std::vector<bool> &keep,
+                        std::vector<size_t> &order )
 {
     size_t n = positions.size();
-    std::vector<bool> keep( n, true );
-    std::vector<size_t> order( n );
+    keep.assign( n, true );
+    order.resize( n );
     for( size_t i = 0; i < n; ++i )
         order[i] = i;
     std::stable_sort( order.begin(), order.end(),
@@ -112,7 +117,6 @@ std::vector<bool> selectByDistance( const std::vector<long long> &positions,
             ++k;
         }
     }
-    return keep;
 }
 
 } // namespace
@@ -178,8 +182,11 @@ void ConvolutionEngine::decideUpTo( long long cutoff, std::vector<PeakEvent> &pe
     // for realistic matched-filter output.
     const long long hi = newestBuffered - 1;
 
-    std::vector<long long> candPos;
-    std::vector<double> candVal;
+    // Members, cleared rather than constructed -- see their declaration.
+    std::vector<long long> &candPos = candPos_;
+    std::vector<double>    &candVal = candVal_;
+    candPos.clear();
+    candVal.clear();
 
     // Already-finalized kept peaks first (ascending, all positions <=
     // lastDecidedAbsIndex_) -- fixed anchors, NOT re-derived from dBuffer_
@@ -204,7 +211,8 @@ void ConvolutionEngine::decideUpTo( long long cutoff, std::vector<PeakEvent> &pe
         }
     }
 
-    std::vector<bool> keep = selectByDistance( candPos, candVal, minSeparationSamples_ );
+    selectByDistance( candPos, candVal, minSeparationSamples_, keep_, order_ );
+    const std::vector<bool> &keep = keep_;
 
     for( size_t i = 0; i < candPos.size(); ++i ) {
         if( candPos[i] > lastDecidedAbsIndex_ && candPos[i] <= cutoff && keep[i] ) {
