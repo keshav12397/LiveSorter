@@ -651,6 +651,54 @@ trajectories rather than obvious breakage:
   narrowest nonrigid window 4.36 -> 0.59 um). The bias is invisible on a
   long probe with small drift and obvious on a narrow nonrigid window.
 
+### RESULT: pooling is 3x more accurate, and the static control explains
+### why the drift modes never helped
+
+1800 s, 160 units, 30 um coherent ramp plus 0.3 nonrigid gain, against a
+matched static arm generated from the same seed (identical spikes, units and
+amplitudes -- only the probe motion differs). Error is rms against the known
+trajectory, in microns:
+
+                              dredge_lite   per-unit tracker
+    drift arm  median              1.05           3.03
+               90th pct            1.41          21.01
+               max                 1.64          56.10
+    static arm median              0.00           2.68
+               90th pct            0.00          22.51
+               max                 0.00          71.34
+
+    estimated motion span: 29.8 um (true 30.0) on the drift arm,
+                            0.0 um (true  0.0) on the static arm
+
+**The static arm is the important column.** On a recording with exactly zero
+drift, per-unit tracking reports up to 71 um of apparent motion, and 36 of
+160 units -- 22% -- exceed the 12 um `tol_um` at which
+`segment_from_trajectory` decides a unit is drifting and cuts it into
+segments.
+
+That is very likely the whole story behind "the drift modes do not help".
+`--mode segmented` was splitting a fifth of the *stationary* population on
+pure measurement noise, starving each of those units' segments of spikes for
+no reason at all, and the harm there cancelled whatever the genuinely
+drifting units gained. The problem was never that drift does not matter. It
+was that the trajectory being segmented on was noise-dominated, so the
+method spent most of its effort on units that were not moving.
+
+`dredge_lite` reports 0.000 um on the static arm -- not "small", identically
+zero, because every pair's correlation peaks at zero shift -- so it has no
+false-positive rate to trade away.
+
+### Rigid or nonrigid?
+
+Use rigid unless the nonrigidity is large. On this session the true
+depth-dependent spread is 8.1 um out of 34.0 um of total motion, and the
+4-window nonrigid fit is slightly *worse* than the rigid one (median 1.12 vs
+1.05 um) while over-reporting the motion span (51.9 vs 34.0 um true): each
+window sees a quarter of the units, and that costs more than the depth
+dependence it recovers. Nonrigid earns its keep when motion actually differs
+across the probe by more than the per-window noise, which is a thing to
+measure, not assume.
+
 ### Running it
 
 `python dredge_lite.py --ks-dir ... --bin-path ... --channel-map-json ...
