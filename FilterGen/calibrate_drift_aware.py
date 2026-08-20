@@ -127,6 +127,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 
 import drift_estimate as de
+import dredge_lite as dl
 import generate_filter as gf
 import motion_correct as mc
 import threshold_sweep_real as tsr
@@ -396,6 +397,284 @@ def _fit_one_unit(target_id, spike_count, mode):
 
 
 # --------------------------------------------------------------------- #
+# Chronological ("calibrate once, then deploy") protocol
+# --------------------------------------------------------------------- #
+#
+# The interleaved protocol above trains on the first half of every short
+# cell, so the control's training data spans the whole trajectory -- it
+# measures interpolation. The case that actually motivates drift-aware
+# filters is extrapolation: calibrate once on a training recording, then
+# run for hours while the unit (and the whole probe) walks away. This
+# section trains on the first --train-frac of the WHOLE recording and
+# evaluates on the untouched remainder, exactly like calibrate_all_units.py,
+# so its 'global' mode reproduces that script's own baseline as an internal
+# check, and 'segmented'/'registered' can be read directly against it.
+#
+# Trajectory source: dredge_lite's pooled, common-mode estimate, built once
+# from the TRAIN half only (never the test half -- that would leak future
+# drift into calibration) and shared by every unit, rather than
+# drift_estimate.unit_trajectory's noisy per-unit centroid. See README.md
+# "Pooled motion estimation" for why: the per-unit tracker reports up to
+# 71 um of apparent motion on a session with none, which upstream of this
+# fix was silently segmenting ~22% of genuinely static units on pure noise.
+#
+# Deployment model: segment boundaries are found across the WHOLE train
+# span, but only the LAST segment -- the one ending at the train/test
+# boundary, i.e. the unit's estimated position at the moment calibration
+# ends -- is ever fit and deployed. That segment's filter is then scored,
+# unchanged, against the entire held-out test half. This is deliberately
+# NOT the same experiment as the interleaved 'segmented' mode, which fits
+# and deploys every segment: there is no live drift schedule inside the
+# test half here, because scoring one would require the test-half drift to
+# be knowable in advance, which is precisely the thing a real deployment
+# does not have.
+
+
+def _fit_filter_on_window(data_win, spike_t_win, spike_cl_win, target_id, a,
+                          np_ch, positions, labels, rng,
+                          target_waveform_override=None):
+    """Pick interferers and fit one LCMV filter from data/spikes already
+    restricted to one window (fitting window's own coordinates -- spike
+    times start at 0). Returns (sel, sel_channels, f, lag, interferer_ids);
+    `sel` is the column-index array into data_win/data_test (as opposed to
+    `sel_channels`, the real Kilosort/SpikeGLX channel ids), needed by the
+    caller to gather the same columns out of the held-out test data.
+    """
+    interferer_ids = gf.auto_pick_interferers_spatial(
+        data_win, spike_t_win, spike_cl_win, np_ch, target_id, labels,
+        a["auto_interferers"], a["template_length"], a["template_offset"],
+        channel_positions=positions, rng=rng)
+    if not interferer_ids:
+        raise ValueError("no interferers found nearby")
+
+    extras = {}
+    f, sel, sel_channels, _, _ = tsr.fit_lcmv(
+        data_win, spike_t_win, spike_cl_win, np_ch, target_id, interferer_ids,
+        a["n_channels"], a["template_length"], a["template_offset"],
+        a["ridge"], a["max_spikes"], rng, extras=extras,
+        target_waveform_override=target_waveform_override)
+    if len(sel_channels) != a["n_channels"]:
+        raise ValueError(f"only {len(sel_channels)} channels available, "
+                         f"need {a['n_channels']}")
+    f = np.asarray(f, dtype=np.float32)
+    lag = gf.detection_lag(f, extras["target_template_sel"], a["template_offset"])
+    return sel, sel_channels, f, lag, interferer_ids
+
+
+def _evaluate_on_test(data_test, spike_t, spike_cl, target_id, interferer_ids,
+                      sel, f, lag, split_t, n_samples, a):
+    """Score one already-fit filter against the untouched test half. Exactly
+    calibrate_all_units.py's evaluation block, factored out so both that
+    script's baseline and this one's chronological modes run identical
+    scoring code."""
+    data_test_sel = data_test[:, sel]
+    D_test = gf.filter_output(data_test_sel, f)
+    peak_idx, peak_scores = tsr.find_all_peaks(D_test, a["template_length"] // 2)
+    peak_idx = peak_idx - lag  # see generate_filter.detection_lag
+
+    target_test = spike_t[(spike_cl == target_id) & (spike_t >= split_t)] - split_t
+    if target_test.size == 0:
+        raise ValueError("no held-out test spikes")
+    interferer_test = {cid: spike_t[(spike_cl == cid) & (spike_t >= split_t)] - split_t
+                       for cid in interferer_ids}
+
+    window = a["template_length"] // 4
+    test_duration_s = (n_samples - split_t) / a["fs"]
+    results = tsr.sweep_thresholds(peak_idx, peak_scores, target_test,
+                                   interferer_test, window, a["n_thresholds"])
+    thresholds = np.array([r["threshold"] for r in results])
+    hits = np.array([r["hits"] for r in results])
+    total_fp = np.array([r["total_fp"] for r in results])
+
+    recall = hits / max(target_test.size, 1)
+    precision = hits / np.maximum(hits + total_fp, 1)
+    f1 = 2 * precision * recall / np.maximum(precision + recall, 1e-9)
+    best = int(np.argmax(f1))
+    return dict(threshold=float(thresholds[best]), recall=float(recall[best]),
+               precision=float(precision[best]), f1=float(f1[best]),
+               fp_rate_hz=float(total_fp[best] / test_duration_s),
+               n_test_spikes=int(target_test.size))
+
+
+def build_pooled_trajectory(data_train, spike_t_train, spike_cl_train, chan_y,
+                            fs, candidates, a):
+    """dredge_lite's pooled, common-mode trajectory over the train half only
+    -- see the module docstring above for why this replaces
+    drift_estimate.unit_trajectory here. Returns (t_c, motion, win_centers);
+    `motion` is (n_windows, n_time), rigid when n_windows == 1.
+    """
+    raster, depth_grid, t_c = dl.build_raster(
+        data_train, spike_t_train, spike_cl_train, chan_y, fs,
+        a["template_length"], a["template_offset"], unit_ids=candidates,
+        bin_s=a["dredge_bin_s"], depth_bin_um=a["dredge_depth_bin_um"])
+    t_c, motion = dl.estimate_motion(
+        raster, depth_grid, t_c, n_windows=a["dredge_n_windows"],
+        window_overlap=a["dredge_window_overlap"],
+        max_disp_um=a["dredge_max_disp_um"], min_corr=a["dredge_min_corr"])
+    win_centers = dl.window_centers_um(depth_grid, a["dredge_n_windows"],
+                                       a["dredge_window_overlap"])
+    print(f"pooled trajectory: {t_c.size} bins, {a['dredge_n_windows']} window(s), "
+          f"span {float(np.ptp(motion)):.1f} um")
+    return t_c, motion, win_centers
+
+
+def _approx_unit_depth(data_train, target_train, chan_y, a, rng):
+    """One coarse depth estimate for a unit -- used only to pick which
+    nonrigid dredge window applies to it (n_windows > 1), never to drive
+    segmentation itself (that stays on the pooled trajectory). A single
+    whole-train mean waveform is enough for that: unlike per-bin tracking,
+    it is not trying to resolve motion, just a resting depth.
+    """
+    wf, _ = gf.mean_waveform(data_train, target_train, a["template_length"],
+                             a["template_offset"], a["max_spikes"], rng)
+    return de._position_from_waveform(wf, chan_y, n_top=8)
+
+
+def _fit_one_unit_chrono(target_id, spike_count, mode):
+    """Runs in a worker process. 'global' fits one filter on all train-half
+    spikes/data (== calibrate_all_units.py's own protocol, as a same-code
+    internal check). 'segmented'/'registered' segment the train half using
+    the pooled dredge trajectory and fit+deploy only the LAST segment --
+    see the module-level comment above this section for why only the last.
+    """
+    data = _worker["data"]
+    np_ch, chan_y = _worker["np_ch"], _worker["chan_y"]
+    positions, labels = _worker["positions"], _worker["labels"]
+    spike_t, spike_cl = _worker["spike_t"], _worker["spike_cl"]
+    a = _worker["args"]
+    n_samples = data.shape[0]
+    split_t = a["split_t"]
+
+    row = {k: "" for k in SUMMARY_FIELDS}
+    row["unit_id"] = target_id
+    row["status"] = "failed"
+    buf = io.StringIO()
+    packed = None
+
+    rng = np.random.default_rng(a["seed"] + target_id)
+
+    try:
+        target_train = spike_t[(spike_cl == target_id) & (spike_t < split_t)]
+        if target_train.size == 0:
+            raise ValueError("no train spikes")
+
+        target_waveform_override = None
+        if mode == "global":
+            lo, hi = 0, split_t
+            drift_span = float("nan")
+            segs_train = [(0, split_t)]
+        elif mode == "recency":
+            # THE CONTROL THAT DECIDES WHAT SEGMENTATION IS WORTH.
+            #
+            # 'segmented' deploys segs_train[-1] -- the LAST train segment.
+            # That segment is not only the one nearest the unit's estimated
+            # end-of-training position, it is also simply the most RECENT
+            # training data, and recency alone helps: the probe's position at
+            # the train/test boundary is closer to the test half than the
+            # start of training is, whatever found the boundary.
+            #
+            # So 'recency' cuts the train half into --recency-segments equal
+            # slices of TIME and deploys the last one, using no trajectory at
+            # all. Any advantage 'segmented' has over THIS is what estimating
+            # drift actually bought. If the two match, the drift estimate is
+            # decoration and a fixed "fit on the last N seconds" rule is the
+            # honest recommendation.
+            #
+            # Set --recency-segments to the segment count 'segmented'
+            # typically produces on the same data, or the comparison is
+            # between different amounts of training data rather than between
+            # two ways of choosing the same amount.
+            k = max(int(a["recency_segments"]), 1)
+            edges = [int(round(i * split_t / k)) for i in range(k + 1)]
+            segs_train = [(edges[i], edges[i + 1]) for i in range(k)]
+            lo, hi = segs_train[-1]
+            drift_span = float("nan")
+        else:
+            t_c_pooled, motion_pooled, win_centers = (
+                a["t_c_pooled"], a["motion_pooled"], a["win_centers"])
+            if motion_pooled.shape[0] == 1:
+                y_pooled = motion_pooled[0]
+            else:
+                y0 = _approx_unit_depth(data[:split_t], target_train, chan_y, a, rng)
+                y_pooled = dl.motion_at(t_c_pooled, y0, t_c_pooled,
+                                        motion_pooled, win_centers)
+            segs_train = de.segment_from_trajectory(
+                t_c_pooled, y_pooled, target_train, a["fs"], split_t,
+                a["tol_um"], a["min_spikes_per_segment"], a["max_segments"])
+            drift_span = float(np.ptp(y_pooled)) if y_pooled.size else 0.0
+            lo, hi = segs_train[-1]
+
+            if mode == "registered":
+                # Every train bin, not just the last segment's -- the whole
+                # point of registration is keeping the full train spike
+                # count while still targeting the deployment position. Bin
+                # depths come from the pooled trajectory sampled at this
+                # unit's own bin times, not from a second, noisier per-unit
+                # centroid pass -- registration inherits the same fix
+                # segmentation does.
+                t_c_u, y_raw_u, wfs_u, ns_u = de.unit_trajectory(
+                    data[:split_t], target_train, chan_y, a["template_length"],
+                    a["template_offset"], a["fs"],
+                    spikes_per_bin=a["spikes_per_bin"], rng=rng,
+                    return_waveforms=True)
+                if t_c_u.size == 0:
+                    raise ValueError("no bins to register")
+                bin_y_pooled = np.interp(t_c_u, t_c_pooled, y_pooled)
+                ref_y = float(np.interp(hi / a["fs"], t_c_pooled, y_pooled))
+                target_waveform_override = mc.registered_template(
+                    bin_y_pooled, wfs_u, ns_u, ref_y, chan_y, a["decay_um"])
+
+        data_win = data[lo:hi]
+        in_win = (spike_t >= lo) & (spike_t < hi)
+        spike_t_win = spike_t[in_win] - lo
+        spike_cl_win = spike_cl[in_win]
+
+        with contextlib.redirect_stdout(buf):
+            sel, sel_channels, f, lag, interferer_ids = _fit_filter_on_window(
+                data_win, spike_t_win, spike_cl_win, target_id, a, np_ch,
+                positions, labels, rng,
+                target_waveform_override=target_waveform_override)
+
+            scored = _evaluate_on_test(data[split_t:], spike_t, spike_cl,
+                                       target_id, interferer_ids, sel, f, lag,
+                                       split_t, n_samples, a)
+
+        # Output as a single deployed filter (no schedule): under this
+        # protocol exactly one filter ever runs, from t=0 through the whole
+        # session, so it is written the same way calibrate_all_units.py
+        # writes its own single filter.
+        packed = ([(0, n_samples)], [(0, n_samples, sel_channels, f)],
+                 np.float32(scored["threshold"]))
+        row.update({
+            "n_channels": a["n_channels"],
+            "sel_channels": " ".join(str(c) for c in sel_channels),
+            "threshold": scored["threshold"],
+            "recall": scored["recall"], "precision": scored["precision"],
+            "f1": scored["f1"], "fp_rate_hz": scored["fp_rate_hz"],
+            "n_train_spikes": int(target_train.size),
+            "n_test_spikes": scored["n_test_spikes"],
+            "n_segments": len(segs_train),
+            "drift_span_um": drift_span,
+            "segment_bounds_s": " ".join(f"{b / a['fs']:.1f}"
+                                         for seg in segs_train for b in seg),
+            "noise_std": "",
+            "detection_lag": lag,
+            "status": "ok",
+        })
+        print(f"unit {target_id} [{mode}] ({spike_count} spikes, fit window "
+              f"[{lo/a['fs']:.0f},{hi/a['fs']:.0f}]s of {len(segs_train)} train "
+              f"seg, span {drift_span:.1f}um): threshold={scored['threshold']:.4f}  "
+              f"recall={scored['recall']:.2%}  precision={scored['precision']:.2%}  "
+              f"f1={scored['f1']:.3f}  lag={lag:+d}", file=buf)
+
+    except Exception as e:
+        row["status"] = f"failed: {e}"
+        print(f"unit {target_id} [{mode}]: SKIPPED: {e}", file=buf)
+
+    return target_id, row, packed, buf.getvalue()
+
+
+# --------------------------------------------------------------------- #
 # Output packing
 # --------------------------------------------------------------------- #
 
@@ -483,7 +762,15 @@ def main():
     ap.add_argument("--bin-path", required=True)
     ap.add_argument("--meta-path")
     ap.add_argument("--channel-map-json")
-    ap.add_argument("--mode", choices=["global", "segmented", "registered", "both", "all"],
+    ap.add_argument("--recency-segments", type=int, default=4,
+                    help="For --mode recency: how many equal-TIME slices to "
+                         "cut the train half into before deploying the last "
+                         "one. Match this to the segment count --mode "
+                         "segmented actually produces, or the two are not "
+                         "comparable. See the 'recency' branch for why this "
+                         "control exists.")
+    ap.add_argument("--mode", choices=["global", "segmented", "registered",
+                                       "recency", "both", "all"],
                     default="both",
                     help="'global' is the baseline fit under this script's "
                          "interleaved protocol (one filter per unit); "
@@ -552,6 +839,35 @@ def main():
     ap.add_argument("--scratch-dir")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--split-mode", choices=["chronological", "interleaved"],
+                    default="chronological",
+                    help="'chronological' (default, the headline protocol): "
+                         "train on the first --train-frac of the WHOLE "
+                         "recording, test on the untouched remainder -- the "
+                         "calibrate-once-then-deploy geometry that motivates "
+                         "drift-aware filters, and the same protocol "
+                         "calibrate_all_units.py uses (its output is the "
+                         "'global' baseline to compare against). "
+                         "'interleaved' keeps the original protocol (train "
+                         "on the first --train-frac of every --cell-s cell, "
+                         "measuring interpolation, not extrapolation) for "
+                         "anyone who wants it; --cell-s and --tol-um/"
+                         "--min-spikes-per-segment/--max-segments still "
+                         "apply to it, and it still uses "
+                         "drift_estimate.unit_trajectory's per-unit "
+                         "trajectory rather than the pooled one, unchanged "
+                         "from before this flag existed.")
+    ap.add_argument("--dredge-bin-s", type=float, default=20.0,
+                    help="Chronological mode only: dredge_lite raster time-"
+                         "bin width in seconds.")
+    ap.add_argument("--dredge-depth-bin-um", type=float, default=5.0)
+    ap.add_argument("--dredge-max-disp-um", type=float, default=80.0)
+    ap.add_argument("--dredge-min-corr", type=float, default=0.1)
+    ap.add_argument("--dredge-n-windows", type=int, default=1,
+                    help="1 = rigid (default -- see README.md 'Rigid or "
+                         "nonrigid?'). >1 = nonrigid, dredge_lite's "
+                         "overlapping-window estimate.")
+    ap.add_argument("--dredge-window-overlap", type=float, default=0.5)
     args = ap.parse_args()
 
     rng = np.random.default_rng(args.seed)
@@ -572,8 +888,13 @@ def main():
     cell_samples = max(1, int(round(args.cell_s * fs)))
     train_samples = int(round(args.train_frac * cell_samples))
     n_cells = data.shape[0] / cell_samples
-    print(f"Interleaved protocol: {n_cells:.0f} cells of {args.cell_s:g}s, "
-          f"first {args.train_frac:.0%} of each cell trains, rest is held out.")
+    split_t = int(round(args.train_frac * data.shape[0]))
+    if args.split_mode == "chronological":
+        print(f"Chronological protocol: train [0, {split_t}) ({split_t / fs:.1f}s), "
+              f"test [{split_t}, {data.shape[0]}) ({(data.shape[0] - split_t) / fs:.1f}s).")
+    else:
+        print(f"Interleaved protocol: {n_cells:.0f} cells of {args.cell_s:g}s, "
+              f"first {args.train_frac:.0%} of each cell trains, rest is held out.")
 
     unit_ids, counts = np.unique(spike_cl, return_counts=True)
     order = np.argsort(counts)[::-1]
@@ -586,6 +907,31 @@ def main():
         if args.max_units and len(candidates) >= args.max_units:
             break
     print(f"{len(candidates)} candidate units of {len(unit_ids)} clusters.")
+
+    n_workers = args.workers if args.workers > 0 else (os.cpu_count() or 1)
+    if args.mode == "both":
+        modes = ["global", "segmented"]
+    elif args.mode == "all":
+        modes = ["global", "segmented", "registered", "recency"]
+    else:
+        modes = [args.mode]
+
+    t_c_pooled = motion_pooled = win_centers = None
+    if args.split_mode == "chronological" and any(m != "global" for m in modes):
+        dredge_args = dict(template_length=args.template_length,
+                           template_offset=args.template_offset,
+                           dredge_bin_s=args.dredge_bin_s,
+                           dredge_depth_bin_um=args.dredge_depth_bin_um,
+                           dredge_n_windows=args.dredge_n_windows,
+                           dredge_window_overlap=args.dredge_window_overlap,
+                           dredge_max_disp_um=args.dredge_max_disp_um,
+                           dredge_min_corr=args.dredge_min_corr)
+        print("Building pooled (dredge_lite) trajectory from the train half...")
+        spike_t_train = spike_t[spike_t < split_t]
+        spike_cl_train = spike_cl[spike_t < split_t]
+        t_c_pooled, motion_pooled, win_centers = build_pooled_trajectory(
+            data[:split_t], spike_t_train, spike_cl_train, chan_y, fs,
+            candidates, dredge_args)
 
     # Release the parent's read-write handle before workers open their own
     # read-only ones -- on Windows a lingering w+ memmap makes concurrent
@@ -603,28 +949,26 @@ def main():
                      fs=fs, seed=args.seed, cell_samples=cell_samples,
                      train_samples=train_samples, train_frac=args.train_frac,
                      tol_um=args.tol_um, spikes_per_bin=args.spikes_per_bin,
+                     recency_segments=args.recency_segments,
                      min_spikes_per_segment=args.min_spikes_per_segment,
-                     max_segments=args.max_segments, decay_um=args.decay_um)
+                     max_segments=args.max_segments, decay_um=args.decay_um,
+                     split_t=split_t, t_c_pooled=t_c_pooled,
+                     motion_pooled=motion_pooled, win_centers=win_centers)
     init_args = (data_path, data_dtype, data_shape, np_ch, chan_y, positions,
                  labels, spike_t, spike_cl, unit_args)
 
-    n_workers = args.workers if args.workers > 0 else (os.cpu_count() or 1)
-    if args.mode == "both":
-        modes = ["global", "segmented"]
-    elif args.mode == "all":
-        modes = ["global", "segmented", "registered"]
-    else:
-        modes = [args.mode]
+    worker_fn = (_fit_one_unit_chrono if args.split_mode == "chronological"
+                else _fit_one_unit)
 
     for mode in modes:
         out_dir = os.path.join(args.out_dir, mode) if len(modes) > 1 else args.out_dir
-        print(f"\n=== mode={mode} -> {out_dir} "
+        print(f"\n=== mode={mode} split={args.split_mode} -> {out_dir} "
               f"({len(candidates)} units, {n_workers} workers) ===")
         t0 = time.time()
         results = {}
         with ProcessPoolExecutor(max_workers=n_workers, initializer=_init_worker,
                                  initargs=init_args) as pool:
-            futs = {pool.submit(_fit_one_unit, uid,
+            futs = {pool.submit(worker_fn, uid,
                                 int(counts[unit_ids == uid][0]), mode): uid
                     for uid in candidates}
             for i, fut in enumerate(as_completed(futs)):
