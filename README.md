@@ -400,6 +400,48 @@ It does not reimplement any fit or sweep math -- it calls
 `threshold_sweep_real.fit_lcmv` and `sweep_thresholds` like every other
 driver here, for the reason those modules state about themselves.
 
+### RESULT: the drift modes do not help. The detection-lag fix did.
+
+Measured on a 30 minute / 160 unit synthetic session with known drift, all
+modes run under one protocol so nothing but the mode differs, amplitude
+>= 20, n=94 paired units:
+
+                        calib_all*   global  segmented  registered
+    static  (n=67)           0.520    0.529      0.530       0.531
+    drifting(n=27)           0.377    0.508      0.501       0.484
+      ramp  (n=11)           0.467    0.587      0.578       0.569
+      osc   (n= 5)           0.578    0.597      0.542       0.539
+      jump  (n=11)           0.194    0.388      0.405       0.374
+
+    drift penalty            0.144    0.022      0.030       0.047
+    (static - drifting)
+
+    * calibrate_all_units.py, BEFORE the detection-lag fix below.
+
+Against the matched `global` control, segmentation is **-0.007** on drifting
+units and registration **-0.024**. Neither helps. What closed the gap was
+the detection-lag fix alone: **+0.131** on drifting units, collapsing the
+drift penalty from 0.144 to 0.022.
+
+That is not a coincidence of this dataset. A drifting unit's template
+changes shape as it moves, so the LCMV filter's alignment with it varies,
+so the lag varies -- and a varying lag crosses the +/-15 sample matching
+window far more often than a fixed one. The bug therefore punished drifting
+units specifically, which looks exactly like a drift penalty and is not one.
+
+**So: use the detection-lag fix, and do not deploy the drift modes on data
+like this.** The remaining 0.022 penalty is close to the noise between
+subgroups. The segmented/registered code is kept because a negative result
+is only meaningful alongside the code that produced it, and because faster
+drift or sparser units than this session contains might still favour it --
+but it should not be turned on without re-measuring against `--mode global`
+on the actual data.
+
+The one subgroup segmentation helps is `jump` (0.388 -> 0.405), the abrupt
+step. It hurts `osc` (0.597 -> 0.542), where a reversible excursion returns
+to where it started so the whole-session template is already near the
+time-average position and segmenting mostly adds fit noise.
+
 ### Two modes
 
 - **`--mode segmented`** cuts the session into segments per unit (from an
@@ -420,9 +462,8 @@ driver here, for the reason those modules state about themselves.
 
 `--mode both` / `--mode all` run several in one pass over the data.
 
-Segmentation is the mode to use. Registration is kept because it is a
-genuinely different mechanism that may matter on faster drift or sparser
-units, but it has not beaten segmentation on the data tested.
+Neither drift mode beat plain `--mode global` on the data tested -- see
+the result above before using either.
 
 ### The trajectory, and channel-id distance
 
