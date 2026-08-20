@@ -466,10 +466,29 @@ def noise_covariance(data_sel, all_spike_times, template_length,
     return C
 
 
-def noise_covariance_vectorized(data_sel, all_spike_times, template_length,
-                                 template_offset, max_samples):
-    """Drop-in replacement for noise_covariance() -- identical inputs/output
-    (verified numerically equivalent in FilterGen tests), but computes every
+def noise_cov_by_lag(data_sel, all_spike_times, template_length,
+                     template_offset, max_samples):
+    """Per-lag noise cross-covariance, `(2*template_length-1, n_ch, n_ch)`,
+    indexed by lag d = -(template_length-1) .. +(template_length-1).
+
+    This is the part of the noise estimate that costs a pass over the
+    recording. `noise_covariance_from_lags` turns it into the space-time
+    matrix R that `lcmv_filter` consumes, and
+    `noise_covariance_vectorized` is the two composed -- the original
+    entry point, byte-for-byte unchanged in behaviour.
+
+    Splitting them is what makes REFITTING a filter cheap. R is
+    block-Toeplitz, and each block depends only on one channel pair's
+    covariance at each lag, so R for ANY subset of channels is an index
+    into this array plus an assembly whose cost depends on the subset size,
+    not on the recording length. A unit that has drifted onto different
+    channels can therefore be refit without rescanning the data -- see
+    `noise_covariance_from_lags`. Computing this over the whole channel
+    group costs (2L-1) * n_ch^2 floats: 121 * 96 * 96 * 8 B = 8.9 MB for
+    this rig, which is nothing to keep resident.
+
+    Everything below is the original vectorized implementation, unchanged.
+    It computes every
     channel-pair's cross-covariance at every lag for a segment in ONE
     np.einsum call instead of looping over each of the n_ch*(n_ch+1)/2
     channel pairs and calling np.correlate(mode='full') separately per pair.
@@ -555,19 +574,44 @@ def noise_covariance_vectorized(data_sel, all_spike_times, template_length,
         # +maxlag ascending, same order _biased_xcov returns.
         acc += cross[::-1]
 
-    cov_by_lag = acc / total_len  # (nlags, n_ch, n_ch), nlags axis indexed by lag d = -maxlag..maxlag
+    # (nlags, n_ch, n_ch), nlags axis indexed by lag d = -maxlag..maxlag
+    return acc / total_len
 
+
+def noise_covariance_from_lags(cov_by_lag, sel, template_length):
+    """Assemble the space-time noise covariance R for the channels in `sel`
+    from a per-lag covariance produced by `noise_cov_by_lag`.
+
+    `cov_by_lag` is (2*template_length-1, n_ch, n_ch) over the FULL channel
+    group; `sel` indexes into that group. Returns
+    (template_length*len(sel), template_length*len(sel)), the matrix
+    `lcmv_filter` takes.
+
+    R is block-Toeplitz because the noise is treated as wide-sense
+    stationary: block (i, k) is the covariance between channel i's
+    template_length-sample window and channel k's, which depends only on the
+    lag between the two samples, not on absolute time. So the whole block is
+    determined by one channel pair's covariance across lags -- which is why
+    the expensive scan can be done once over every channel and reused for
+    any subset afterwards.
+
+    No recomputation and no data access: this is pure index-and-assemble,
+    O(len(sel)^2 * template_length^2). For 5 channels and L=61 that is 15
+    upper-triangle blocks of 61x61.
+    """
+    sel = np.asarray(sel, dtype=int)
+    n_ch = sel.size
     dim = template_length * n_ch
     C = np.zeros((dim, dim))
 
     for i in range(n_ch):
         for k in range(i + 1):
-            cov_combined = cov_by_lag[:, i, k]  # length nlags == 2*template_length-1, same shape _biased_xcov used to return
+            # length 2*template_length-1, the shape _biased_xcov returned
+            cov_combined = cov_by_lag[:, sel[i], sel[k]]
 
             col = cov_combined[template_length - 1:]
             row = cov_combined[:template_length][::-1]
             T = toeplitz(row, col)
-
             C[i * template_length:(i + 1) * template_length,
               k * template_length:(k + 1) * template_length] = T
             if i != k:
@@ -575,6 +619,22 @@ def noise_covariance_vectorized(data_sel, all_spike_times, template_length,
                   i * template_length:(i + 1) * template_length] = T.T
 
     return C
+
+
+def noise_covariance_vectorized(data_sel, all_spike_times, template_length,
+                                 template_offset, max_samples):
+    """Drop-in replacement for noise_covariance() -- identical inputs and
+    output, verified numerically equivalent in FilterGen tests.
+
+    Now a composition of `noise_cov_by_lag` (the pass over the recording)
+    and `noise_covariance_from_lags` (the assembly). Callers that will refit
+    the same channels' neighbours later should call those two directly and
+    keep the per-lag array; callers doing a single fit can keep using this.
+    """
+    cov_by_lag = noise_cov_by_lag(data_sel, all_spike_times, template_length,
+                                  template_offset, max_samples)
+    return noise_covariance_from_lags(cov_by_lag, np.arange(data_sel.shape[1]),
+                                      template_length)
 
 
 # --------------------------------------------------------------------- #
