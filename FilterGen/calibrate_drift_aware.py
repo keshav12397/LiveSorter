@@ -498,11 +498,41 @@ def _evaluate_on_test(data_test, spike_t, spike_cl, target_id, interferer_ids,
 
 def build_pooled_trajectory(data_train, spike_t_train, spike_cl_train, chan_y,
                             fs, candidates, a):
-    """dredge_lite's pooled, common-mode trajectory over the train half only
-    -- see the module docstring above for why this replaces
-    drift_estimate.unit_trajectory here. Returns (t_c, motion, win_centers);
-    `motion` is (n_windows, n_time), rigid when n_windows == 1.
+    """Pooled, common-mode trajectory over the train half only -- see the
+    module docstring above for why this replaces a per-unit trajectory here.
+    Returns (t_c, motion, win_centers); `motion` is (n_windows, n_time),
+    rigid when n_windows == 1.
+
+    Two estimators, selected by --motion-estimator, with the same contract.
+
+    'com' (default) pools per-unit amplitude-weighted centroid depths.
+    'dredge' cross-correlates an amplitude raster. The default is 'com'
+    because it measured better on both sessions available and costs far
+    less -- simulator rmse 0.10 um against dredge's 1.03 with truth known,
+    Lav69 corr 0.962 against 0.845 with KS4's dshift as reference, ~11 s of
+    localisation against a raster build plus an O(n_time^2) sweep. See
+    drift_estimate.pooled_com_motion for the full comparison and for why
+    monopolar triangulation was tried and rejected.
+
+    'dredge' is kept rather than deleted because the two fail differently:
+    the centroid needs each unit to be localisable on its own, while the
+    raster registers the population's summed profile and does not care
+    whether any single unit is well isolated. On a recording dominated by
+    overlapping low-amplitude units that difference could invert the
+    ranking, and there is no session here that tests it.
     """
+    if a.get("motion_estimator", "com") == "com":
+        t_c, motion, win_centers = de.pooled_com_motion(
+            data_train, spike_t_train, spike_cl_train, chan_y,
+            a["template_length"], a["template_offset"], fs, candidates,
+            bin_s=a["dredge_bin_s"], spikes_per_bin=a["spikes_per_bin"],
+            n_windows=a["dredge_n_windows"],
+            window_overlap=a["dredge_window_overlap"])
+        print(f"pooled trajectory [com]: {t_c.size} bins, "
+              f"{a['dredge_n_windows']} window(s), "
+              f"span {float(np.ptp(motion)):.1f} um")
+        return t_c, motion, win_centers
+
     raster, depth_grid, t_c = dl.build_raster(
         data_train, spike_t_train, spike_cl_train, chan_y, fs,
         a["template_length"], a["template_offset"], unit_ids=candidates,
@@ -513,7 +543,8 @@ def build_pooled_trajectory(data_train, spike_t_train, spike_cl_train, chan_y,
         max_disp_um=a["dredge_max_disp_um"], min_corr=a["dredge_min_corr"])
     win_centers = dl.window_centers_um(depth_grid, a["dredge_n_windows"],
                                        a["dredge_window_overlap"])
-    print(f"pooled trajectory: {t_c.size} bins, {a['dredge_n_windows']} window(s), "
+    print(f"pooled trajectory [dredge]: {t_c.size} bins, "
+          f"{a['dredge_n_windows']} window(s), "
           f"span {float(np.ptp(motion)):.1f} um")
     return t_c, motion, win_centers
 
@@ -857,6 +888,13 @@ def main():
                          "drift_estimate.unit_trajectory's per-unit "
                          "trajectory rather than the pooled one, unchanged "
                          "from before this flag existed.")
+    ap.add_argument("--motion-estimator", choices=["com", "dredge"],
+                    default="com",
+                    help="How the pooled trajectory is built. 'com' pools "
+                         "per-unit centroid depths (default: more accurate "
+                         "and far cheaper on every session measured so far). "
+                         "'dredge' cross-correlates an amplitude raster. See "
+                         "drift_estimate.pooled_com_motion.")
     ap.add_argument("--dredge-bin-s", type=float, default=20.0,
                     help="Chronological mode only: dredge_lite raster time-"
                          "bin width in seconds.")
@@ -920,13 +958,16 @@ def main():
     if args.split_mode == "chronological" and any(m != "global" for m in modes):
         dredge_args = dict(template_length=args.template_length,
                            template_offset=args.template_offset,
+                           motion_estimator=args.motion_estimator,
+                           spikes_per_bin=args.spikes_per_bin,
                            dredge_bin_s=args.dredge_bin_s,
                            dredge_depth_bin_um=args.dredge_depth_bin_um,
                            dredge_n_windows=args.dredge_n_windows,
                            dredge_window_overlap=args.dredge_window_overlap,
                            dredge_max_disp_um=args.dredge_max_disp_um,
                            dredge_min_corr=args.dredge_min_corr)
-        print("Building pooled (dredge_lite) trajectory from the train half...")
+        print(f"Building pooled [{args.motion_estimator}] trajectory "
+              f"from the train half...")
         spike_t_train = spike_t[spike_t < split_t]
         spike_cl_train = spike_cl[spike_t < split_t]
         t_c_pooled, motion_pooled, win_centers = build_pooled_trajectory(

@@ -139,6 +139,127 @@ def unit_trajectory(data, spike_times, chan_y, template_length, template_offset,
     return t_c, smooth_trajectory(y_raw, smooth)
 
 
+
+def pooled_com_motion(data, spike_times, spike_clusters, chan_y,
+                      template_length, template_offset, fs, unit_ids,
+                      bin_s=20.0, spikes_per_bin=150, n_top=8,
+                      n_windows=1, window_overlap=0.5, min_units=5,
+                      rng=None):
+    """Common-mode probe motion by pooling per-unit centroid trajectories.
+
+    Returns `(t_center_s, motion, win_centers_um)` with `motion` shaped
+    (n_windows, n_time) -- the same contract `dredge_lite.estimate_motion`
+    plus `window_centers_um` return, so the two are interchangeable at the
+    call site.
+
+    Why this exists alongside dredge_lite
+    -------------------------------------
+    dredge_lite registers an amplitude RASTER by cross-correlation. This
+    tracks each unit's amplitude-weighted centroid depth (the same
+    `_position_from_waveform` used everywhere else here), converts each to a
+    DISPLACEMENT by subtracting that unit's own mean, and takes the median
+    across units at each time. Measured on the same sessions:
+
+                              simulator (truth known)      Lav69 (vs KS4 dshift)
+        dredge_lite raster    rmse 1.03 um                 corr 0.845  rmse 1.00
+        pooled centroid       rmse 0.10 um, slope 0.998    corr 0.962  rmse 0.85
+
+    plus ~11 s of localisation against a raster build and an O(n_time^2)
+    correlation sweep. Three structural reasons it wins, not just three
+    better numbers:
+
+      - A centroid is CONTINUOUS in depth. The raster path quantises to a
+        depth bin, which is what let the comb bug (see dredge_lite's
+        build_raster) return identically zero on a real recording. This
+        estimator cannot fail that way; there is no grid to align to.
+      - Sub-pitch motion needs no interpolation trick. A unit that moves
+        2 um moves its centroid 2 um.
+      - Each unit's displacement is its own measurement, so pooling is a
+        plain robust average rather than a graph solve.
+
+    Monopolar triangulation was tried in place of the centroid and is not
+    worth it: on Lav69 it scored slope 0.585 against the centroid's 0.578
+    and corr 0.963 against 0.962, for 31 s of solving against 0.1 s. The
+    residual amplitude disagreement with KS4 is NOT a centroid artifact --
+    it survives changing the localiser, and the centroid recovers simulator
+    truth at slope 0.998, so it is more likely dshift's scale than ours.
+    That is an inference, not a measurement: Lav69 has no ground truth.
+
+    MEDIAN, not mean, across units. A minority of units have their centroid
+    dominated by one channel and barely move; on the simulator both agree
+    (slope 0.998 vs 0.984) but on real data the mean is visibly noisier
+    (corr 0.873 vs 0.962). The median is what survives contact with a real
+    population.
+
+    With `n_windows > 1` the depth axis is cut into overlapping windows and
+    units are pooled within each by their own mean depth -- the nonrigid
+    case. Windows overlap for the reason dredge_lite states: a motion field
+    with discontinuities is not a thing tissue does, and each window needs
+    enough units to average. A window holding fewer than `min_units` falls
+    back to the all-unit estimate rather than reporting its own noise.
+    """
+    rng = rng or np.random.default_rng(0)
+    n_samples = data.shape[0]
+    n_time = max(int(np.ceil(n_samples / (bin_s * fs))), 2)
+    grid = (np.arange(n_time) + 0.5) * (n_samples / n_time) / fs
+
+    disp, depth = [], []
+    for uid in unit_ids:
+        st = spike_times[spike_clusters == uid]
+        if st.size < 4 * spikes_per_bin:
+            continue
+        t_c, y = unit_trajectory(data, st, chan_y, template_length,
+                                 template_offset, fs,
+                                 spikes_per_bin=spikes_per_bin,
+                                 n_top=n_top, rng=rng, smooth=1)
+        ok = np.isfinite(y)
+        if ok.sum() < 4:
+            continue
+        # left/right leave NaN outside a unit's own span on purpose: a unit
+        # that stopped firing must abstain there, not extrapolate flat and
+        # drag the median toward zero.
+        yi = np.interp(grid, t_c[ok], y[ok], left=np.nan, right=np.nan)
+        if np.all(np.isnan(yi)):
+            continue
+        disp.append(yi - np.nanmean(yi))
+        depth.append(float(np.nanmean(y[ok])))
+
+    if not disp:
+        return grid, np.zeros((max(n_windows, 1), n_time)), np.array([np.mean(chan_y)])
+
+    Y = np.asarray(disp)
+    depth = np.asarray(depth)
+
+    def _pool(mask):
+        if mask.sum() < min_units:
+            mask = np.ones(Y.shape[0], dtype=bool)
+        with np.errstate(invalid="ignore"):
+            m = np.nanmedian(Y[mask], axis=0)
+        # A time bin nobody covered is filled from its neighbours rather than
+        # left NaN: downstream consumers evaluate the trajectory at arbitrary
+        # times and a NaN there silently poisons a filter.
+        bad = ~np.isfinite(m)
+        if bad.all():
+            return np.zeros(n_time)
+        if bad.any():
+            m[bad] = np.interp(grid[bad], grid[~bad], m[~bad])
+        return m - m.mean()
+
+    if n_windows <= 1:
+        return grid, _pool(np.ones(Y.shape[0], dtype=bool))[None, :], \
+               np.array([float(np.mean(chan_y))])
+
+    y_lo, y_hi = float(np.min(chan_y)), float(np.max(chan_y))
+    width = (y_hi - y_lo) / (1.0 + (n_windows - 1) * (1.0 - window_overlap))
+    out = np.zeros((n_windows, n_time))
+    centers = np.zeros(n_windows)
+    for w in range(n_windows):
+        lo = y_lo + w * width * (1.0 - window_overlap)
+        hi = lo + width
+        centers[w] = 0.5 * (lo + hi)
+        out[w] = _pool((depth >= lo) & (depth <= hi))
+    return grid, out, centers
+
 def smooth_trajectory(y_um, smooth=3):
     """Running median of a per-bin trajectory, `unit_trajectory`'s own
     smoothing step factored out so `calibrate_drift_aware.py`'s 'registered'
