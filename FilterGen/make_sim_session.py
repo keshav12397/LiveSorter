@@ -199,6 +199,44 @@ def draw_rate(rng):
     return float(np.clip(rng.lognormal(mean=np.log(1.5), sigma=1.60), 0.2, 25.0))
 
 
+def assign_drift_sweep(units, max_drift_um, duration_s):
+    """Replace the random drift assignment with a systematic ramp sweep:
+    unit i drifts monotonically by (i / (n-1)) * max_drift_um over the
+    session, alternating sign.
+
+    Exists to answer a question the randomized assignment cannot: *how much*
+    detection performance does a given amount of drift actually cost? The
+    randomized population mixes three drift shapes over a narrow magnitude
+    range, and its units displace a median of only ~12 um between the first
+    and second half of the session -- under one channel at a 15 um pitch.
+    A real recording's units are commonly quoted as moving ~30 um (two
+    channels) over a day, so the randomized population is under-powered for
+    exactly the regime that matters, and a null result on it says little.
+
+    Ramp only, deliberately. 'osc' returns to where it started, so its
+    train-to-test displacement is near zero however large its excursion, and
+    'jump' confounds magnitude with an abrupt discontinuity. A monotonic
+    ramp is the shape that makes "calibrate now, deploy later" progressively
+    harder in proportion to one number, which is what a dose-response curve
+    needs.
+
+    The relevant quantity is not the total excursion but the displacement
+    between the training data's centroid and the test data's -- with a
+    chronological half/half split, that is half the total ramp.
+    """
+    n = len(units)
+    for i, u in enumerate(units):
+        frac = i / max(n - 1, 1)
+        u["drift_kind"] = "ramp" if frac > 0 else "none"
+        u["drift_um"] = float(max_drift_um * frac) * (1.0 if i % 2 == 0 else -1.0)
+        u["drift_period_s"] = 0.0
+        u["drift_jump_s"] = 0.0
+        # Held at a constant fraction rather than drawn, so amplitude
+        # modulation cannot vary along the sweep and confound the curve.
+        u["amp_drift_frac"] = 0.20 if frac > 0 else 0.0
+    return units
+
+
 def build_units(rng, n_units, n_drifting, group_yc, duration_s):
     """Draw a population of units with position, amplitude, rate, and (for
     a subset) a drift trajectory.
@@ -276,6 +314,12 @@ def build_units(rng, n_units, n_drifting, group_yc, duration_s):
         u["drift_period_s"] = 0.0
         u["drift_jump_s"] = 0.0
         u["amp_drift_frac"] = 0.0
+        # Probe-wide motion defaults to off, so a session generated without
+        # --probe-drift-um is bit-for-bit what this simulator always
+        # produced. assign_probe_motion() overwrites these.
+        u["probe_drift_um"] = 0.0
+        u["probe_jumps"] = []
+        u["probe_nonrigid_scale"] = 1.0
 
     for k, idx in enumerate(drifting):
         u = units[int(idx)]
@@ -292,8 +336,91 @@ def build_units(rng, n_units, n_drifting, group_yc, duration_s):
     return units
 
 
-def unit_offset_um(u, t_s):
-    """Position offset (microns) of unit `u` at time(s) `t_s`. Vectorized."""
+def assign_probe_motion(units, rng, group_yc, duration_s, drift_um,
+                        n_jumps=0, jump_um=0.0, nonrigid_gain=0.0):
+    """Give every unit the SAME probe-motion trajectory. See probe_offset_um.
+
+    `drift_um` is the rigid ramp over the whole session, measured at the
+    middle of the group: 30 um is the two-channel-per-day settling that is
+    the ordinary case on a chronic recording, not a pathological one.
+
+    `nonrigid_gain` is the fractional difference in motion between the two
+    ends of the group. 0.0 is rigid; 0.4 means the shallow end moves 20%
+    more than the mean and the deep end 20% less. The scale is centred on
+    the group midpoint so that `drift_um` stays interpretable as the typical
+    displacement no matter what the gain is.
+
+    Jump times are drawn away from the very start and end of the session:
+    a step in the first or last few percent is indistinguishable from a
+    slightly different ramp, so it would test nothing while making the
+    ground truth harder to read.
+    """
+    y_lo, y_hi = float(np.min(group_yc)), float(np.max(group_yc))
+    y_mid = 0.5 * (y_lo + y_hi)
+    y_span = max(y_hi - y_lo, 1e-9)
+
+    jumps = []
+    for _ in range(int(n_jumps)):
+        t_jump = float(rng.uniform(0.15, 0.85)) * duration_s
+        jumps.append((t_jump, float(rng.uniform(0.5, 1.0) * jump_um)
+                      * float(rng.choice([-1.0, 1.0]))))
+    jumps.sort()
+
+    for u in units:
+        u["probe_drift_um"] = float(drift_um)
+        u["probe_jumps"] = list(jumps)
+        u["probe_nonrigid_scale"] = 1.0 + nonrigid_gain * (
+            (float(u["y0"]) - y_mid) / y_span)
+    return units
+
+
+def probe_offset_um(u, t_s):
+    """Probe-wide tissue motion at unit `u`'s depth, at time(s) `t_s`.
+
+    THIS is what real drift mostly is, and it is *shared by every unit*. The
+    probe settles, the brain pulses, the animal moves: the tissue slides
+    along the shank and takes the whole population with it. A unit does not
+    wander off on its own while its neighbour 30 um away holds still.
+
+    That distinction is not cosmetic, it decides which estimators can work
+    at all. An estimator that pools across units -- the decentralized
+    registration family, of which `dredge_lite.py` here is a small member --
+    exists precisely because the motion is common-mode: 160 units each
+    giving a noisy vote on one shared trajectory beats any of them alone by
+    ~sqrt(160). Give every unit an *independent* direction instead and that
+    entire class of method is not merely unhelpful, it is inapplicable, and
+    a session built that way cannot be used to evaluate it.
+
+    Nonrigid motion is real too: the tissue does not slide as a rigid body,
+    so one end of a long probe can move more than the other.
+    `probe_nonrigid_scale` is the per-unit gain that produces this -- linear
+    in depth, which is the first-order term of any smooth depth-dependent
+    motion field and the one nonrigid schemes model first.
+
+    Jumps are kept separate from the ramp rather than folded into one shape.
+    Slow settling and abrupt steps coexist in real recordings and they break
+    different things: a slow tracker follows the ramp fine and lags the step
+    badly.
+    """
+    t_s = np.asarray(t_s, dtype=np.float64)
+    if u["probe_drift_um"] == 0.0 and not u["probe_jumps"]:
+        return np.zeros_like(t_s)
+    off = u["probe_drift_um"] * (t_s / u["_duration_s"])
+    for t_jump, a_jump in u["probe_jumps"]:
+        off = off + np.where(t_s >= t_jump, a_jump, 0.0)
+    return off * u["probe_nonrigid_scale"]
+
+
+def unit_residual_offset_um(u, t_s):
+    """The part of unit `u`'s motion that is its own, not the probe's.
+
+    A separate term from `probe_offset_um` because it is a different
+    physical thing -- a unit shifting relative to the tissue around it, or
+    the estimator-visible consequence of a slowly changing waveform -- and
+    because a pooled estimator can only ever recover the common-mode part.
+    Leaving a residual in is what stops a pooled estimate from scoring
+    perfectly for the wrong reason.
+    """
     t_s = np.asarray(t_s, dtype=np.float64)
     kind = u["drift_kind"]
     if kind == "none":
@@ -310,11 +437,29 @@ def unit_offset_um(u, t_s):
     raise ValueError("unknown drift kind " + kind)
 
 
+def unit_offset_um(u, t_s):
+    """Total position offset (microns) of unit `u` at time(s) `t_s`.
+
+    Probe-wide motion plus the unit's own residual. Every call site -- the
+    renderer and the truth writer alike -- goes through here, so the two can
+    never disagree about where a unit was. With no probe motion configured
+    this returns exactly the per-unit drift the simulator always had.
+    """
+    return probe_offset_um(u, t_s) + unit_residual_offset_um(u, t_s)
+
+
 def unit_amp_scale(u, t_s):
-    """Amplitude scale factor at time(s) `t_s`, co-varying with drift."""
+    """Slow multiplicative gain trend at time(s) `t_s`.
+
+    Deliberately keyed to the unit's *residual* motion, not its total: the
+    amplitude change caused by moving relative to the electrodes is already
+    produced by the spatial profile at the render site, which recomputes
+    channel distances at the unit's current depth. Using the total here
+    would apply that falloff a second time.
+    """
     if u["drift_kind"] == "none":
         return np.ones_like(np.asarray(t_s, dtype=np.float64))
-    off = unit_offset_um(u, t_s)
+    off = unit_residual_offset_um(u, t_s)
     denom = abs(u["drift_um"]) if u["drift_um"] != 0 else 1.0
     return 1.0 + u["amp_drift_frac"] * (off / denom)
 
@@ -440,6 +585,28 @@ def main():
     ap.add_argument("--sample-rate", type=float, default=30000.0)
     ap.add_argument("--n-units", type=int, default=160)
     ap.add_argument("--n-drifting", type=int, default=48)
+    # --- probe-wide (tissue) motion, shared by every unit ------------------
+    # Distinct from --n-drifting, which gives units independent per-unit
+    # motion. Real drift is overwhelmingly common-mode; see probe_offset_um.
+    ap.add_argument("--probe-drift-um", type=float, default=0.0,
+                    help="Rigid probe-wide ramp over the session, microns, "
+                         "applied to EVERY unit. 30 = the usual ~2-channel "
+                         "settling over a day's recording.")
+    ap.add_argument("--probe-jumps", type=int, default=0,
+                    help="Number of abrupt probe-wide steps, on top of the "
+                         "ramp.")
+    ap.add_argument("--probe-jump-um", type=float, default=20.0,
+                    help="Scale of each --probe-jumps step (each is drawn "
+                         "0.5-1.0x this, with a random sign).")
+    ap.add_argument("--probe-nonrigid-gain", type=float, default=0.0,
+                    help="Fractional motion difference between the two ends "
+                         "of the group. 0 = rigid; 0.4 = shallow end moves "
+                         "20%% more than the mean, deep end 20%% less.")
+    ap.add_argument("--drift-sweep-um", type=float, default=0.0,
+                    help="If > 0, ignore --n-drifting and give unit i a "
+                         "monotonic ramp of (i/(n-1)) * this many microns, "
+                         "alternating sign -- a dose-response sweep of drift "
+                         "magnitude. See assign_drift_sweep().")
     ap.add_argument("--noise-sigma", type=float, default=6.5,
                     help="Per-channel white noise sigma in ADC counts. The "
                          "default is calibrated so the post-CAR noise MAD "
@@ -480,6 +647,20 @@ def main():
 
     # --- population -------------------------------------------------------
     units = build_units(rng, args.n_units, args.n_drifting, group_yc, args.duration_s)
+    if args.probe_drift_um != 0.0 or args.probe_jumps > 0:
+        units = assign_probe_motion(units, rng, group_yc, args.duration_s,
+                                    args.probe_drift_um, args.probe_jumps,
+                                    args.probe_jump_um,
+                                    args.probe_nonrigid_gain)
+        jt = ", ".join(f"{t:.0f}s{a:+.0f}um" for t, a in units[0]["probe_jumps"])
+        print(f"  probe motion: ramp {args.probe_drift_um:+.0f} um over "
+              f"{args.duration_s:.0f}s, nonrigid gain "
+              f"{args.probe_nonrigid_gain:.2f}"
+              + (f", jumps [{jt}]" if jt else ""))
+    if args.drift_sweep_um > 0:
+        units = assign_drift_sweep(units, args.drift_sweep_um, args.duration_s)
+        print(f"  drift sweep: ramp 0..{args.drift_sweep_um:.0f} um across "
+              f"{len(units)} units (train->test displacement is half of each)")
 
     # --- spike trains -----------------------------------------------------
     print("Drawing spike trains...")
@@ -734,9 +915,17 @@ def write_truth(path, units, spike_times, spike_clusters, syllables, args, fs,
     peak_chan = np.zeros((len(units), t_grid.size), dtype=np.int32)
     peak_gidx = np.zeros((len(units), t_grid.size), dtype=np.int32)
 
+    # Stored separately from the total so a pooled estimator can be scored
+    # against the thing it actually estimates. dredge_lite.py recovers the
+    # common-mode trajectory and *cannot* recover a unit's private residual;
+    # scoring it against drift_position_um alone would charge it for an error
+    # no method of its class can avoid.
+    probe_um = np.zeros((len(units), t_grid.size), dtype=np.float32)
+
     for i, u in enumerate(units):
         y = u["y0"] + unit_offset_um(u, t_grid)
         pos_um[i] = y
+        probe_um[i] = probe_offset_um(u, t_grid)
         amp_scale[i] = unit_amp_scale(u, t_grid)
         # Peak channel at each time = the group channel physically closest to
         # the unit's centre. This is the quantity a drift-aware filter has to
@@ -770,6 +959,7 @@ def write_truth(path, units, spike_times, spike_clusters, syllables, args, fs,
         drift_kind=np.array([u["drift_kind"] for u in units]),
         drift_um=np.array([u["drift_um"] for u in units], dtype=np.float32),
         drift_position_um=pos_um,
+        probe_offset_um=probe_um,
         drift_amp_scale=amp_scale,
         drift_peak_channel=peak_chan,
         drift_peak_group_index=peak_gidx,

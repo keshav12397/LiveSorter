@@ -1,0 +1,368 @@
+"""
+dredge_lite.py
+==============
+
+Probe-wide motion estimation by decentralized registration -- a small,
+self-contained version of the method in DREDge (Windolf et al.;
+https://github.com/evarol/dredge), specialised to the situation this
+codebase is already in.
+
+Why this exists, and why it is not just `drift_estimate.py` again
+-----------------------------------------------------------------
+`drift_estimate.unit_trajectory` tracks each unit *independently*: bin that
+unit's spikes, take each bin's mean waveform, follow its amplitude centroid.
+That estimator has one irreducible problem. A unit firing at 1.5 Hz gives a
+60 s bin about 90 spikes, and the centroid of a 90-spike average moves by
+several microns on noise alone. The drift we care about is ~30 um over a
+session. The measurement noise is a large fraction of the signal, per unit,
+and no amount of smoothing one unit's own trajectory fixes that -- smoothing
+trades the noise for exactly the lag that makes an abrupt step unfindable.
+
+The way out is not a better per-unit estimator. It is to stop estimating per
+unit at all. **Drift is common-mode**: the tissue slides along the shank and
+carries the whole population with it. So 160 units are not 160 separate
+problems, they are 160 noisy votes on ONE trajectory, and pooling them beats
+any single vote by roughly sqrt(N).
+
+That is the entire idea behind DREDge, and it is worth being precise about
+what "decentralized" buys, because it is not obvious:
+
+  - The naive pooled estimate picks a reference time bin and measures every
+    other bin against it. That makes the whole trajectory hostage to one
+    bin, and it degrades badly when the probe has moved so far that the
+    reference no longer overlaps the current state.
+  - The decentralized estimate instead measures *every pair* of time bins
+    against each other, giving a displacement D_ij and a confidence w_ij,
+    and then solves for the single trajectory p that best explains all of
+    them at once. No bin is privileged. Pairs that could not be compared
+    reliably simply get a low weight instead of corrupting the result.
+
+The solve is a weighted least-squares over a graph, which is a graph
+Laplacian system (see `solve_decentralized`), and with uniform weights it
+collapses to the pleasing identity p_i = mean_j D_ij.
+
+What is simplified relative to real DREDge
+------------------------------------------
+DREDge's AP mode starts from raw data and must *localize* each spike --
+estimate a position for a single detected event -- before it can build a
+raster. We are downstream of a sorter, so we already know which spikes
+belong to which unit, and we can average a unit's spikes within a time bin
+before measuring anything. The raster here is therefore built from per-unit
+per-bin mean-waveform amplitude profiles rather than from single-spike
+localizations: same raster, much better SNR per entry, no localizer to
+tune. This is the one place where being downstream of a sorter is a real
+advantage rather than an inconvenience.
+
+Also omitted: DREDge's online/streaming solver, its robust (L1/Huber)
+reweighting, and its GPU paths. `--min-corr` is the only robustness
+mechanism here and it is a blunt one.
+
+What this cannot do
+-------------------
+It recovers the *common-mode* trajectory and nothing else. A unit that
+genuinely moves relative to its neighbours is invisible to it -- that motion
+is not in the raster's shared structure. `make_sim_session.py` models both
+terms separately (`probe_offset_um` and `unit_residual_offset_um`) so this
+distinction can be scored rather than assumed.
+
+Metric distances
+----------------
+As everywhere in this codebase, positions are microns from the channel map's
+`yc`, never SpikeGLX channel ids -- `shank1only.json`'s chanMap steps by +49
+twice, so two channels 15 um apart can have ids 49 apart. See
+`drift_estimate.py`'s header.
+"""
+
+import numpy as np
+
+import generate_filter as gf
+
+
+# --------------------------------------------------------------------- #
+# 1. The raster
+# --------------------------------------------------------------------- #
+
+def build_raster(data, spike_times, spike_clusters, chan_y, fs,
+                 template_length, template_offset, unit_ids=None,
+                 bin_s=20.0, depth_bin_um=5.0, min_spikes_per_bin=8,
+                 max_spikes_per_bin=400, rng=None):
+    """Amplitude as a function of (depth, time): the input every step below
+    consumes.
+
+    Returns `(raster, depth_grid_um, t_center_s)` where `raster` has shape
+    (n_depth, n_time).
+
+    Time bins are FIXED-DURATION here, unlike `drift_estimate.unit_trajectory`
+    which uses equal-spike bins. That difference is forced and not a
+    preference: a raster column has to be a snapshot of the whole population
+    at one moment, so every unit's bin edges must line up. Equal-spike
+    binning gives each unit its own edges, which is the right choice when
+    each unit is estimated alone and the wrong one here.
+
+    Each (unit, bin) contributes its mean waveform's per-channel
+    peak-to-peak profile, scaled by how many spikes went into it. Keeping the
+    full profile rather than collapsing it to a centroid is the point: the
+    profile is a ~30 um bump whose *shape* is what cross-correlation
+    registers, and it survives being summed with other units' bumps in a way
+    a centroid does not.
+
+    `min_spikes_per_bin` drops (unit, bin) cells too sparse to mean
+    meaningfully. Their mean waveform is mostly noise, whose ptp profile is
+    flat-ish and positive on every channel -- so admitting them does not add
+    a weak signal, it adds a DC pedestal across the whole depth axis that
+    dilutes every real bump.
+    """
+    rng = rng or np.random.default_rng(0)
+    spike_times = np.asarray(spike_times)
+    spike_clusters = np.asarray(spike_clusters)
+
+    n_samples = data.shape[0]
+    lo_ok = template_offset
+    hi_ok = n_samples - template_length + template_offset
+
+    if unit_ids is None:
+        unit_ids = np.unique(spike_clusters)
+
+    bin_samples = int(round(bin_s * fs))
+    n_time = max(int(np.ceil(n_samples / bin_samples)), 1)
+    t_center = (np.arange(n_time) + 0.5) * bin_samples / fs
+
+    y_lo, y_hi = float(np.min(chan_y)), float(np.max(chan_y))
+    depth_grid = np.arange(y_lo, y_hi + depth_bin_um, depth_bin_um)
+    raster = np.zeros((depth_grid.size, n_time), dtype=np.float64)
+
+    # Each channel's amplitude is spread linearly between the two grid points
+    # that bracket its depth. Nearest-neighbour assignment instead would
+    # quantise every channel to a grid point and make the raster's structure
+    # a function of grid phase, which then shows up as a bias in the
+    # cross-correlation peak.
+    pos = np.clip((np.asarray(chan_y, dtype=np.float64) - y_lo) / depth_bin_um,
+                  0, depth_grid.size - 1 - 1e-9)
+    i0 = np.floor(pos).astype(int)
+    frac = pos - i0
+    i1 = np.minimum(i0 + 1, depth_grid.size - 1)
+
+    for uid in unit_ids:
+        st = spike_times[spike_clusters == uid]
+        st = st[(st > lo_ok) & (st < hi_ok)]
+        if st.size == 0:
+            continue
+        which = np.minimum((st // bin_samples).astype(int), n_time - 1)
+        for b in np.unique(which):
+            bin_st = st[which == b]
+            if bin_st.size < min_spikes_per_bin:
+                continue
+            wf, _ = gf.mean_waveform(data, bin_st, template_length,
+                                     template_offset,
+                                     max_spikes=max_spikes_per_bin, rng=rng)
+            amp = np.ptp(np.asarray(wf, dtype=np.float64), axis=0)
+            # Same noise-floor subtraction as _position_from_waveform, for
+            # the same reason: with few spikes averaged every channel has a
+            # positive ptp from noise alone.
+            amp = np.maximum(amp - np.median(amp), 0.0)
+            if not np.any(amp > 0):
+                continue
+            amp = amp * float(bin_st.size)
+            np.add.at(raster, (i0, int(b)), amp * (1.0 - frac))
+            np.add.at(raster, (i1, int(b)), amp * frac)
+
+    return raster, depth_grid, t_center
+
+
+# --------------------------------------------------------------------- #
+# 2. Pairwise displacements
+# --------------------------------------------------------------------- #
+
+def pairwise_displacements(raster, depth_bin_um, max_disp_um=100.0,
+                           max_lag_bins=0, min_corr=0.0):
+    """Cross-correlate every admissible pair of time bins.
+
+    Returns `(D, W)`, both (n_time, n_time). `D[i, j]` is the depth shift in
+    microns that best takes column i onto column j, and `W[i, j]` is the
+    normalized correlation at that shift, used as the pair's weight. `D` is
+    antisymmetric and `W` symmetric by construction -- computed on the upper
+    triangle and mirrored, not computed twice, so the two can never disagree.
+
+    Correlations are true Pearson coefficients in [-1, 1], so a bin whose
+    total amplitude happens to be large does not get a louder vote than a bin
+    whose spatial structure is clearer.
+
+    Each shift is scored on the OVERLAPPING depth range only, with the mean
+    and norm recomputed over that range. Normalizing the full columns once
+    up front and then zeroing whatever a shift pushes off the end is the
+    obvious implementation and it is wrong: it leaves the denominator sized
+    for the full column while the numerator has lost rows, so every large
+    shift is penalised in proportion to its size and the estimate is
+    systematically shrunk toward zero. The bias is invisible on a long probe
+    with small drift and clearly visible on a narrow nonrigid window, where
+    a +-60 um search discards a fifth of a 330 um window's rows.
+
+    `max_lag_bins` bands the problem: pairs further apart in time than this
+    are not compared at all. Two reasons, and the second matters more. The
+    obvious one is cost, which is quadratic in the number of time bins. The
+    real one is that when the probe has drifted far, distant bins genuinely
+    do not overlap, and their correlation peak is then matching noise -- a
+    confidently wrong D_ij, which is much worse than a missing one. 0 means
+    no banding.
+
+    `min_corr` zeroes pairs whose best correlation is below it. A zero weight
+    removes the pair from the solve entirely, which is the intended effect:
+    an unmeasurable pair should abstain, not vote quietly.
+    """
+    raster = np.asarray(raster, dtype=np.float64)
+    n_depth, n_time = raster.shape
+    max_shift = int(round(max_disp_um / depth_bin_um))
+    max_shift = int(np.clip(max_shift, 1, max(n_depth - 1, 1)))
+
+    X = raster
+
+    D = np.zeros((n_time, n_time), dtype=np.float64)
+    W = np.zeros((n_time, n_time), dtype=np.float64)
+
+    shifts = np.arange(-max_shift, max_shift + 1)
+    for i in range(n_time):
+        hi = n_time if max_lag_bins <= 0 else min(n_time, i + max_lag_bins + 1)
+        if hi <= i + 1:
+            continue
+        block = X[:, i + 1:hi]                       # (n_depth, k)
+        cc = np.full((shifts.size, block.shape[1]), -np.inf, dtype=np.float64)
+        for k, s in enumerate(shifts):
+            # Rows of `block` that a reference shifted by `s` actually covers.
+            lo_b, hi_b = max(0, s), n_depth + min(0, s)
+            if hi_b - lo_b < 4:
+                continue
+            ref = X[lo_b - s:hi_b - s, i]
+            blk = block[lo_b:hi_b, :]
+            r = ref - ref.mean()
+            b = blk - blk.mean(axis=0, keepdims=True)
+            rn = np.linalg.norm(r)
+            bn = np.linalg.norm(b, axis=0)
+            denom = rn * bn
+            good = denom > 0
+            cc[k, good] = (r @ b[:, good]) / denom[good]
+        best = np.argmax(cc, axis=0)
+        peak = cc[best, np.arange(block.shape[1])]
+        disp = shifts[best] * depth_bin_um
+
+        peak = np.where(peak >= min_corr, np.maximum(peak, 0.0), 0.0)
+        disp = np.where(peak > 0.0, disp, 0.0)
+        j = np.arange(i + 1, hi)
+        D[i, j] = disp
+        D[j, i] = -disp
+        W[i, j] = peak
+        W[j, i] = peak
+
+    return D, W
+
+
+# --------------------------------------------------------------------- #
+# 3. The decentralized solve
+# --------------------------------------------------------------------- #
+
+def solve_decentralized(D, W, ridge=1e-6):
+    """Least-squares trajectory `p` from pairwise displacements.
+
+    Minimises  sum_{i<j} W_ij * (p_j - p_i - D_ij)^2.
+
+    Setting the gradient to zero gives the normal equations `L p = b` with
+    `L = diag(W.sum(1)) - W` -- the weighted graph Laplacian -- and
+    `b_k = -sum_j W_kj * D_kj`. `L` is singular: adding a constant to every
+    p_i changes no difference and so changes no residual, which is the
+    correct statement that only *relative* motion is observable here. The
+    ridge picks one solution out of that family and the mean-centring below
+    picks the natural one.
+
+    That leading minus on `b` is not a typo and is easy to get backwards --
+    `D` is antisymmetric, so both sums in the gradient collapse to the same
+    `+D_kj` form and the term lands on the opposite side from where it looks
+    like it should. With uniform weights and a fully connected graph the
+    solution is p_k = mean_j D_jk: the mean displacement taking every other
+    bin *onto* bin k, not off it. `test_dredge_lite.py` asserts exactly that
+    identity, which is what caught the sign being wrong the first time.
+    """
+    W = np.asarray(W, dtype=np.float64)
+    D = np.asarray(D, dtype=np.float64)
+    n = W.shape[0]
+    L = np.diag(W.sum(axis=1)) - W
+    b = -np.sum(W * D, axis=1)
+    p = np.linalg.solve(L + ridge * np.eye(n), b)
+    return p - p.mean()
+
+
+# --------------------------------------------------------------------- #
+# 4. Rigid and nonrigid estimation
+# --------------------------------------------------------------------- #
+
+def estimate_motion(raster, depth_grid_um, t_center_s, n_windows=1,
+                    window_overlap=0.5, max_disp_um=100.0,
+                    max_lag_bins=0, min_corr=0.0):
+    """Motion trajectory from a raster. Returns `(t_center_s, motion)`.
+
+    `motion` has shape (n_windows, n_time). With `n_windows == 1` this is the
+    rigid estimate: one trajectory for the whole probe. With more, the depth
+    axis is cut into overlapping windows and each is solved independently --
+    the nonrigid case, where tissue near one end of the probe moves
+    differently from the other end.
+
+    Windows OVERLAP on purpose. Disjoint windows give a motion field with
+    discontinuities at the boundaries, which is not a thing tissue does, and
+    each window would also see only its own share of units -- the pooling
+    that makes this method work at all needs the units.
+
+    Use `motion_at` to evaluate the result at a particular depth.
+    """
+    depth_bin_um = float(depth_grid_um[1] - depth_grid_um[0])
+    n_depth = raster.shape[0]
+
+    if n_windows <= 1:
+        D, W = pairwise_displacements(raster, depth_bin_um, max_disp_um,
+                                      max_lag_bins, min_corr)
+        return t_center_s, solve_decentralized(D, W)[None, :]
+
+    # Window centres span the depth axis; each window is wide enough that
+    # consecutive ones overlap by `window_overlap`.
+    width = n_depth / (1.0 + (n_windows - 1) * (1.0 - window_overlap))
+    out = np.zeros((n_windows, t_center_s.size), dtype=np.float64)
+    for w in range(n_windows):
+        lo = int(round(w * width * (1.0 - window_overlap)))
+        hi = int(round(lo + width))
+        sub = raster[max(lo, 0):min(hi, n_depth), :]
+        if sub.shape[0] < 4:
+            continue
+        D, W = pairwise_displacements(sub, depth_bin_um, max_disp_um,
+                                      max_lag_bins, min_corr)
+        out[w] = solve_decentralized(D, W)
+    return t_center_s, out
+
+
+def window_centers_um(depth_grid_um, n_windows, window_overlap=0.5):
+    """Depth of each window's centre, matching estimate_motion's geometry."""
+    n_depth = depth_grid_um.size
+    if n_windows <= 1:
+        return np.array([0.5 * (depth_grid_um[0] + depth_grid_um[-1])])
+    width = n_depth / (1.0 + (n_windows - 1) * (1.0 - window_overlap))
+    c = []
+    for w in range(n_windows):
+        lo = w * width * (1.0 - window_overlap)
+        idx = np.clip(lo + 0.5 * width, 0, n_depth - 1)
+        c.append(float(np.interp(idx, np.arange(n_depth), depth_grid_um)))
+    return np.asarray(c)
+
+
+def motion_at(t_query_s, y_query_um, t_center_s, motion, win_centers_um):
+    """Evaluate an `estimate_motion` result at arbitrary (time, depth).
+
+    Linear in both axes, and constant (edge-clamped) outside the estimated
+    range: extrapolating a motion field past the units that constrained it
+    invents drift that nothing measured.
+    """
+    motion = np.atleast_2d(motion)
+    t_query_s = np.asarray(t_query_s, dtype=np.float64)
+    if motion.shape[0] == 1:
+        return np.interp(t_query_s, t_center_s, motion[0])
+    per_win = np.stack([np.interp(t_query_s, t_center_s, motion[w])
+                        for w in range(motion.shape[0])], axis=0)
+    y = np.clip(float(y_query_um), float(np.min(win_centers_um)),
+                float(np.max(win_centers_um)))
+    return np.array([np.interp(y, win_centers_um, per_win[:, k])
+                     for k in range(t_query_s.size)])
