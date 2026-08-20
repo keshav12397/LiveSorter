@@ -56,3 +56,48 @@ latencyLogPath=D:/scratch/gui_verify_latency.csv
 viewerEnabled=true
 viewerPort=4143
 runDurationSec=30
+
+# --------------------------------------------------------------------------
+# CORRECTION to the "DecisionThread throughput ceiling" note recorded above.
+#
+# That note says the ~1 kHz polling ceiling still caps spike_count at 0-1 on
+# the live path. It was measured against a binary built BEFORE 60a7b3f
+# ("Drain DecisionThread's queues instead of taking one event per pass"),
+# which is this commit's own parent -- so as written it asserts a bug that
+# the code beneath it already fixes. The observation was real; the build it
+# came from was stale.
+#
+# Re-measured with ClosedLoopAllUnits.exe rebuilt from a clean HEAD, live
+# against SpikeGLX replaying D:/sim_session_v2, 40 s, 139 units,
+# decisionUnitIds=88,4,51, windowEndMs=100, spikeCountThreshold=3, with the
+# machine simultaneously running two 8-worker calibrations on 12 cores:
+#
+#   IMEC sample accounting
+#     span      1203806 samples (40.1269 s)
+#     processed 1203806      dropped 0 in 0 gaps      fetch errors 0
+#     max backlog 162 samples (5.4 ms)
+#     RESULT: every sample accounted for, none dropped.
+#   viewer socket: 318435 records published, 0 dropped
+#
+#   Trials: 9 syllables -> 9 trials -> ALL 9 with spike_count=3, triggered=1
+#   (3 is the threshold; counting stops once a trial fires.)
+#   DO line: 9 raises, 9 lowers -- one pair per triggered trial.
+#
+# Independently confirmed on the wire by a from-scratch Python client that
+# transcribes the layout from LiveWire.h rather than reusing
+# Viewer/LiveWireClient.cpp, so a self-consistent misreading of the format
+# cannot pass:
+#
+#   header  magic=LCMV version=1 nUnits=139 imecFs=30000 niFs=0
+#           syllableSourceIsImecSy=1
+#   317322 records over 32 s: 317286 spike, 9 syllable, 9 trial, 18 line
+#   spike sampleIndex advanced 960460 samples = 32.0 s (monotonic live feed)
+#   all 9 trials spike_count=3 triggered=1; 9 line-high, 9 line-low
+#
+# So the fix holds live, not only in OfflineReplay, and it holds while the
+# machine is CPU-oversubscribed.
+#
+# Still unverified, unchanged: syllableSource=ni. The NI stream on this rig
+# is a Fake_40kHz source with an all-zero digital word, so the production
+# syllable path cannot be exercised here at all.
+# --------------------------------------------------------------------------
