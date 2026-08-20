@@ -4,7 +4,7 @@
 #include <vector>
 
 // GPU-batched port of generate_filter.noise_covariance_vectorized(), one
-// block per unit (same batching pattern as GpuConvolutionEngine's
+// block per unit (same batching pattern as MultiConvolutionEngine's
 // matchedFilterKernel) -- each unit keeps its OWN small spike-free-segment
 // mask (its own target+interferers, ~6 clusters, matching Python) and its
 // OWN selected channels, but all units' blocks run concurrently instead of
@@ -29,7 +29,7 @@
 // split must fit in GPU memory at once (no chunked/streaming variant yet).
 // Fine for the current ~22min test recording (~96 channels, single shank);
 // would need chunking with cross-chunk segment carry-over (same pattern
-// GpuConvolutionEngine already uses for its NMS tail state) if a future
+// MultiConvolutionEngine already uses for its NMS tail state) if a future
 // recording's single-shank preprocessed data doesn't fit in ~24GB.
 
 struct SpikeFreeSegment {

@@ -108,7 +108,7 @@ void ImecFetchThread::fetchLoop()
     // fix anything: ConvolutionEngine's constructor already maps a
     // non-positive value to templateLength/2, so the earlier omission here
     // was a no-op rather than the "no minimum separation enforced" bug an
-    // earlier version of this comment claimed -- see ImecFetchThreadGPU.cu's
+    // earlier version of this comment claimed -- see ImecFetchThreadCpu.cpp's
     // matching comment and FilterGen/stream_alignment.py's docstring for
     // where that misreading came from.
     const long long minSep = filterBank_.templateLength / 2;

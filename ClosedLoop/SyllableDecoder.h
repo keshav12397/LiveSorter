@@ -21,7 +21,7 @@
 // Callers differ only in where the digital word comes from and what its
 // sample index means:
 //   - NiFetchThread   : NI DW channel, lines 5/6/7 (bits 5/6/7), NI clock.
-//   - ImecFetchThreadGPU (syllableSource=imecSy): IMEC SY channel bits 0-2,
+//   - ImecFetchThreadCpu (syllableSource=imecSy): IMEC SY channel bits 0-2,
 //     IMEC clock. Test path only -- see README.md and
 //     FilterGen/make_sim_session.py.
 class SyllableDecoder {

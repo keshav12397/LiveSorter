@@ -29,10 +29,11 @@
 // had to be move-only to stop two owners racing to cudaFree the same
 // pointers; that whole class of failure is gone.
 //
-// filters are stored as float, not double, purely to keep the packed file
-// layout and byte sizes identical. MultiConvolutionEngine widens each unit's
-// taps to double once at construction, because ConvolutionEngine -- the
-// battle-tested per-unit core this bank feeds -- works in double.
+// filters are stored as float32, which is both the packed file layout and
+// the precision calibrate_all_units.py picks thresholds in -- see
+// FastMatchedFilter.h. MultiConvolutionEngine's production path convolves
+// in that same float32; its float64 reference path widens the taps once at
+// construction, because ConvolutionEngine works in double.
 struct MultiFilterBank {
     int nUnits = 0;
     int nChannelsPerUnit = 0;
@@ -43,7 +44,7 @@ struct MultiFilterBank {
     // single-target FilterBank::channels) -- NOT yet indices into the
     // preprocessed CAR-group buffer the convolution actually reads from.
     // ImecFetchThreadCpu::fetchLoop() translates raw id -> CAR-group
-    // position once at startup, exactly as ImecFetchThreadGPU did.
+    // position once at startup, into its own copy of this bank.
     std::vector<int32_t> channels;
     std::vector<float>   filters;     // [nUnits * templateLength * nChannelsPerUnit], [unit][t][c]
     std::vector<float>   thresholds;  // [nUnits]

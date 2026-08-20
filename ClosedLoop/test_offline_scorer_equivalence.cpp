@@ -65,7 +65,7 @@ int main( int argc, char **argv )
 
     int minSep = templateLength / 2;
     // matchedFilterKernel needs (chunkSamples+L-1)*N*sizeof(float) bytes of
-    // PER-BLOCK shared memory (see GpuConvolutionEngine's constructor-time
+    // PER-BLOCK shared memory (see MultiConvolutionEngine's constructor-time
     // check) -- must stay small (this is why the live pipeline only ever
     // uses ~5ms-sized fetch chunks, not an arbitrarily large one).
     int chunkSamples = 2000;

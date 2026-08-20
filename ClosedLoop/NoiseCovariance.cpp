@@ -1,18 +1,18 @@
 #include "NoiseCovariance.h"
 
+#include <atomic>
+#include <thread>
+
 #include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <utility>
-#include <cuda_runtime.h>
 
-#include "CudaUtil.h"
 
 // Local accumulator array size cap -- this project always fits N=5
 // (calibrate_all_units.py's --n-channels, fixed per unit by design, see its
 // module docstring), 8 leaves headroom without risking local-memory
 // spilling from an oversized per-thread array.
-#define MAX_N 8
 
 
 std::vector<SpikeFreeSegment> findSpikeFreeSegments(
@@ -66,76 +66,56 @@ std::vector<SpikeFreeSegment> findSpikeFreeSegments(
 
 namespace {
 
-// One block per unit, one thread per lag (nlags = 2*(templateLength-1)+1,
-// e.g. 121 for templateLength=61 -- comfortably under a 128/256 blockDim).
+// One task per (unit, lag) pair; nlags = 2*(templateLength-1)+1, e.g. 121 for
+// templateLength=61, so even a single unit has plenty of independent work to
+// spread across cores.
+//
 // Ports noise_covariance_vectorized's per-segment windowed cross-covariance
 // accumulation verbatim (see that function's docstring for the o<->lag
 // index-convention derivation this mirrors exactly, not re-derived here):
 // for lag d, cross[i,k] = sum_t seg[t,i] * (seg[t-d,k] if 0<=t-d<L else 0).
-__global__ void noiseCovarianceKernel(
+//
+// The GPU version computed each segment's per-channel means on thread 0 and
+// broadcast them through shared memory, since the mean does not depend on
+// lag. Here they are computed ONCE for all lags before the parallel loop --
+// same saving, and no synchronisation at all.
+void noiseCovarianceForLag(
     const float *data, long long dataStride /* nChannelsGroup */,
     int templateLength, int N,
-    const int *unitChannels, // [nUnits * N]
-    const SpikeFreeSegment *segments, const int *segOffset, const int *segCount,
-    int nUnits, double *accOut /* [nUnits * nlags * N * N] */ )
+    const int *chans,
+    const SpikeFreeSegment *segments, int segN,
+    const double *segMeans /* [segN * N] */,
+    int lag, double *out /* [N * N] */ )
 {
-    extern __shared__ double sMean[]; // [N]
-
-    int unit = blockIdx.x;
-    if( unit >= nUnits )
-        return;
-
-    int maxlag = templateLength - 1;
-    int nlags = 2 * maxlag + 1;
-    if( threadIdx.x >= nlags )
-        return;
-    int lag = threadIdx.x - maxlag;
-
-    const int *chans = unitChannels + unit * N;
-    int segOff = segOffset[unit];
-    int segN   = segCount[unit];
-
-    double localAcc[MAX_N * MAX_N];
-    for( int i = 0; i < N * N; ++i )
-        localAcc[i] = 0.0;
+    std::vector<double> localAcc( static_cast<size_t>( N ) * N, 0.0 );
 
     for( int s = 0; s < segN; ++s ) {
 
-        SpikeFreeSegment seg = segments[segOff + s];
-        int L = seg.end - seg.start;
+        const SpikeFreeSegment &seg = segments[s];
+        const int L = seg.end - seg.start;
+        const double *mean = segMeans + static_cast<size_t>( s ) * N;
 
-        // Per-channel mean over this segment, computed once (thread 0) and
-        // broadcast via shared memory -- shared across all nlags threads
-        // for this segment rather than each thread redundantly recomputing
-        // it (mean doesn't depend on lag).
-        if( threadIdx.x == 0 ) {
-            for( int c = 0; c < N; ++c ) {
-                double sum = 0.0;
-                int ch = chans[c];
-                for( int t = 0; t < L; ++t )
-                    sum += data[static_cast<size_t>( seg.start + t ) * dataStride + ch];
-                sMean[c] = sum / L;
-            }
-        }
-        __syncthreads();
+        // t ranges only over positions whose lagged partner is also inside the
+        // segment. The GPU version tested `tk < 0 || tk >= L` inside the loop
+        // and skipped; clamping the bounds instead is the same set of terms
+        // (the skipped ones contribute the zero-padding Python's padded window
+        // also contributes) without the per-sample branch.
+        const int tLo = ( lag > 0 ) ? lag : 0;
+        const int tHi = ( lag > 0 ) ? L : L + lag;
 
-        for( int t = 0; t < L; ++t ) {
-            int tk = t - lag;
-            if( tk < 0 || tk >= L )
-                continue; // zero-padded contribution, matches Python's padded window
-
+        for( int t = tLo; t < tHi; ++t ) {
+            const int tk = t - lag;
+            const float *rowT  = data + static_cast<size_t>( seg.start + t ) * dataStride;
+            const float *rowTk = data + static_cast<size_t>( seg.start + tk ) * dataStride;
             for( int i = 0; i < N; ++i ) {
-                double vi = data[static_cast<size_t>( seg.start + t ) * dataStride + chans[i]] - sMean[i];
-                for( int k = 0; k < N; ++k ) {
-                    double vk = data[static_cast<size_t>( seg.start + tk ) * dataStride + chans[k]] - sMean[k];
-                    localAcc[i * N + k] += vi * vk;
-                }
+                const double vi = rowT[chans[i]] - mean[i];
+                double *accRow = &localAcc[static_cast<size_t>( i ) * N];
+                for( int k = 0; k < N; ++k )
+                    accRow[k] += vi * ( rowTk[chans[k]] - mean[k] );
             }
         }
-        __syncthreads(); // all threads must finish this segment's work before thread 0 overwrites sMean for the next
     }
 
-    double *out = accOut + ( static_cast<size_t>( unit ) * nlags + threadIdx.x ) * N * N;
     for( int i = 0; i < N * N; ++i )
         out[i] = localAcc[i];
 }
@@ -198,56 +178,70 @@ std::vector<std::vector<double> > computeNoiseCovarianceBatched(
     const std::vector<int> &segmentCounts,
     int nUnits )
 {
-    if( N > MAX_N )
-        throw std::runtime_error( "computeNoiseCovarianceBatched: N exceeds MAX_N -- "
-                                   "raise MAX_N in NoiseCovariance.cu" );
+    (void)nSamples;
 
-    int maxlag = templateLength - 1;
-    int nlags = 2 * maxlag + 1;
+    const int maxlag = templateLength - 1;
+    const int nlags  = 2 * maxlag + 1;
 
-    int *d_unitChannels = nullptr;
-    SpikeFreeSegment *d_segments = nullptr;
-    int *d_segOffset = nullptr;
-    int *d_segCount = nullptr;
-    double *d_acc = nullptr;
+    // Per-segment per-channel means, hoisted out of the lag loop -- see
+    // noiseCovarianceForLag's note.
+    std::vector<std::vector<double> > segMeans( nUnits );
+    for( int u = 0; u < nUnits; ++u ) {
+        const int segN = segmentCounts[u];
+        const int *chans = unitChannels.data() + static_cast<size_t>( u ) * N;
+        segMeans[u].assign( static_cast<size_t>( segN ) * N, 0.0 );
+        for( int s = 0; s < segN; ++s ) {
+            const SpikeFreeSegment &seg = segments[segmentOffsets[u] + s];
+            const int L = seg.end - seg.start;
+            for( int c = 0; c < N; ++c ) {
+                double sum = 0.0;
+                const int ch = chans[c];
+                for( int t = 0; t < L; ++t )
+                    sum += dData[static_cast<size_t>( seg.start + t ) * nChannelsGroup + ch];
+                segMeans[u][static_cast<size_t>( s ) * N + c] = sum / L;
+            }
+        }
+    }
 
-    CUDA_CHECK( cudaMalloc( &d_unitChannels, unitChannels.size() * sizeof(int) ) );
-    CUDA_CHECK( cudaMemcpy( d_unitChannels, unitChannels.data(),
-                             unitChannels.size() * sizeof(int), cudaMemcpyHostToDevice ) );
+    std::vector<double> hostAcc(
+        static_cast<size_t>( nUnits ) * nlags * N * N, 0.0 );
 
-    CUDA_CHECK( cudaMalloc( &d_segments, std::max<size_t>( segments.size(), 1 ) * sizeof(SpikeFreeSegment) ) );
-    if( !segments.empty() )
-        CUDA_CHECK( cudaMemcpy( d_segments, segments.data(),
-                                 segments.size() * sizeof(SpikeFreeSegment), cudaMemcpyHostToDevice ) );
+    // Flat (unit, lag) task list claimed from one atomic counter. Units have
+    // very different segment counts, so a static split would leave one worker
+    // holding every long unit.
+    const long long nTasks = static_cast<long long>( nUnits ) * nlags;
+    std::atomic<long long> next( 0 );
 
-    CUDA_CHECK( cudaMalloc( &d_segOffset, segmentOffsets.size() * sizeof(int) ) );
-    CUDA_CHECK( cudaMemcpy( d_segOffset, segmentOffsets.data(),
-                             segmentOffsets.size() * sizeof(int), cudaMemcpyHostToDevice ) );
+    int nThreads = static_cast<int>( std::thread::hardware_concurrency() );
+    if( nThreads <= 0 ) nThreads = 1;
+    if( static_cast<long long>( nThreads ) > nTasks )
+        nThreads = static_cast<int>( nTasks );
+    if( nThreads < 1 ) nThreads = 1;
 
-    CUDA_CHECK( cudaMalloc( &d_segCount, segmentCounts.size() * sizeof(int) ) );
-    CUDA_CHECK( cudaMemcpy( d_segCount, segmentCounts.data(),
-                             segmentCounts.size() * sizeof(int), cudaMemcpyHostToDevice ) );
+    auto worker = [&]() {
+        for( ;; ) {
+            long long t = next.fetch_add( 1 );
+            if( t >= nTasks )
+                return;
+            const int u       = static_cast<int>( t / nlags );
+            const int lagIdx  = static_cast<int>( t % nlags );
+            const int lag     = lagIdx - maxlag;
+            noiseCovarianceForLag(
+                dData, nChannelsGroup, templateLength, N,
+                unitChannels.data() + static_cast<size_t>( u ) * N,
+                segments.data() + segmentOffsets[u], segmentCounts[u],
+                segMeans[u].data(), lag,
+                hostAcc.data() +
+                    ( static_cast<size_t>( u ) * nlags + lagIdx ) * N * N );
+        }
+    };
 
-    size_t accCount = static_cast<size_t>( nUnits ) * nlags * N * N;
-    CUDA_CHECK( cudaMalloc( &d_acc, accCount * sizeof(double) ) );
-
-    int blockDim = nlags; // one thread per lag; nlags is small (e.g. 121), well under 1024
-    size_t shmemBytes = static_cast<size_t>( N ) * sizeof(double);
-    noiseCovarianceKernel<<<nUnits, blockDim, shmemBytes>>>(
-        dData, nChannelsGroup, templateLength, N,
-        d_unitChannels, d_segments, d_segOffset, d_segCount,
-        nUnits, d_acc );
-    CUDA_CHECK( cudaGetLastError() );
-    CUDA_CHECK( cudaDeviceSynchronize() );
-
-    std::vector<double> hostAcc( accCount );
-    CUDA_CHECK( cudaMemcpy( hostAcc.data(), d_acc, accCount * sizeof(double), cudaMemcpyDeviceToHost ) );
-
-    cudaFree( d_unitChannels );
-    cudaFree( d_segments );
-    cudaFree( d_segOffset );
-    cudaFree( d_segCount );
-    cudaFree( d_acc );
+    std::vector<std::thread> pool;
+    for( int i = 1; i < nThreads; ++i )
+        pool.emplace_back( worker );
+    worker();
+    for( size_t i = 0; i < pool.size(); ++i )
+        pool[i].join();
 
     std::vector<std::vector<double> > result( nUnits );
     for( int u = 0; u < nUnits; ++u ) {

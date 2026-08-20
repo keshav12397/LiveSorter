@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-// Streams a raw SpikeGLX .bin file through GpuPreprocessor (causal highpass
+// Streams a raw SpikeGLX .bin file through Preprocessor (causal highpass
 // + CAR, byte-identical code path to the live detection pipeline -- reusing
 // it here removes the causal/acausal drift risk by construction, see the
 // branch plan) and writes the result to a float32 scratch file on disk,
@@ -16,7 +16,7 @@
 //
 // carChannelIds: raw SpikeGLX channel ids to keep (e.g. one shank, from
 // --channel-map-json) -- CAR is computed over this whole group, matching
-// Preprocessor.h/GpuPreprocessor's existing requirement that CAR see the
+// Preprocessor.h's existing requirement that CAR see the
 // full trained channel group, not just one unit's 5 channels.
 //
 // Returns the number of samples actually written (bounded by

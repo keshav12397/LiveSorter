@@ -12,9 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
-#include <cuda_runtime.h>
 
-#include "CudaUtil.h"
 #include "ScratchMemmap.h"
 #include "NoiseCovariance.h"
 
@@ -58,9 +56,7 @@ int main( int argc, char **argv )
     ScratchMemmap scratch( argv[2], nSamplesTrain, nChannelsGroup );
 
     size_t nFloats = static_cast<size_t>( nSamplesTrain ) * nChannelsGroup;
-    float *d_data = nullptr;
-    CUDA_CHECK( cudaMalloc( &d_data, nFloats * sizeof(float) ) );
-    CUDA_CHECK( cudaMemcpy( d_data, scratch.row( 0 ), nFloats * sizeof(float), cudaMemcpyHostToDevice ) );
+
 
     std::vector<SpikeFreeSegment> segments = findSpikeFreeSegments(
         spikeTimes, nSamplesTrain, templateLength, templateOffset );
@@ -70,10 +66,10 @@ int main( int argc, char **argv )
     std::vector<int> segmentCounts( 1, static_cast<int>( segments.size() ) );
 
     std::vector<std::vector<double> > result = computeNoiseCovarianceBatched(
-        d_data, nSamplesTrain, nChannelsGroup, templateLength, N,
+        scratch.row( 0 ), nSamplesTrain, nChannelsGroup, templateLength, N,
         selChannels, segments, segmentOffsets, segmentCounts, /*nUnits=*/1 );
 
-    cudaFree( d_data );
+    
 
     const std::vector<double> &R = result[0];
     double maxAbsErr = 0.0, maxAbsVal = 0.0;

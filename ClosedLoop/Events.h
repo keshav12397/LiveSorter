@@ -12,7 +12,7 @@ struct SpikeEvent {
     int        unitId;        // Kilosort cluster id. -1 for the single-target pipeline
                                // (ImecFetchThread/DecisionThread never read this field);
                                // a real cluster id when produced by the all-units GPU
-                               // pipeline (ImecFetchThreadGPU) -- see GpuFilterBank::hostUnitIds.
+                               // pipeline (ImecFetchThreadCpu) -- see MultiFilterBank::hostUnitIds.
 };
 
 struct SyllableEvent {

@@ -1,6 +1,6 @@
 // Scores SyllableDecoder against a make_sim_session.py session's own
 // ground truth, by streaming the SY channel out of the .bin exactly the way
-// ImecFetchThreadGPU streams it out of the live server.
+// ImecFetchThreadCpu streams it out of the live server.
 //
 // Why this test rather than a live run
 // ------------------------------------

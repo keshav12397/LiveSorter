@@ -45,7 +45,7 @@ std::vector<int> selectChannels( const std::vector<double> &targetWf,
 // spikesByCluster: EVERY cluster's spike times, already grouped and sorted
 // ascending (cluster id -> ascending spike times) -- takes this instead of
 // KilosortData's flat parallel arrays so a caller processing many units
-// (e.g. mainCalibrateAllUnits.cu, one call per candidate unit) builds this
+// (e.g. mainCalibrateAllUnits.cpp, one call per candidate unit) builds this
 // grouping ONCE up front rather than this function re-scanning the full
 // (multi-million-spike) flat arrays from scratch on every call. That
 // re-scan was exactly this function's original implementation and measured

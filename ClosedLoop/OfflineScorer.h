@@ -13,10 +13,10 @@ struct UnitPeaks {
 };
 
 // Streams [testStartSample, testStartSample + testNumSamples) of the raw
-// SpikeGLX .bin file through GpuPreprocessor + GpuConvolutionEngine (both
+// SpikeGLX .bin file through Preprocessor + MultiConvolutionEngine (both
 // reused completely unmodified from the live detection pipeline -- see the
-// mainCalibrateAllUnits.cu), using a GpuFilterBank built with an all
-// -infinity threshold array (GpuFilterBank::fromHostArrays) so every
+// mainCalibrateAllUnits.cpp), using a MultiFilterBank built with an all
+// -infinity threshold array (MultiFilterBank::fromHostArrays) so every
 // windowed-NMS-accepted peak gets reported instead of only above-threshold
 // detections -- this is what makes a held-out threshold SWEEP possible
 // afterward (ThresholdSweep.h), without a second NMS kernel to validate
@@ -24,7 +24,7 @@ struct UnitPeaks {
 //
 // unitChannelsInCarGroup: [nUnits * N], already translated to indices
 // within the CAR/preprocessed channel group (0..carChannelIds.size()-1) --
-// same convention ImecFetchThreadGPU::fetchLoop() produces for the live path.
+// same convention ImecFetchThreadCpu::fetchLoop() produces for the live path.
 std::vector<UnitPeaks> scoreAllUnitsOffline(
     const std::string &binPath, const std::string &metaPath,
     const std::vector<int> &carChannelIds,

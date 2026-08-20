@@ -5,13 +5,11 @@
 #include <algorithm>
 #include <limits>
 #include <string>
-#include <cuda_runtime.h>
 
-#include "CudaUtil.h"
 #include "SglxMetaReader.h"
-#include "GpuFilterBank.h"
-#include "GpuPreprocessor.h"
-#include "GpuConvolutionEngine.h"
+#include "MultiFilterBank.h"
+#include "Preprocessor.h"
+#include "MultiConvolutionEngine.h"
 
 
 std::vector<UnitPeaks> scoreAllUnitsOffline(
@@ -46,11 +44,17 @@ std::vector<UnitPeaks> scoreAllUnitsOffline(
     // All -infinity thresholds -- every windowed-NMS-accepted peak is
     // reported unconditionally (see this file's header comment).
     std::vector<float> thresholds( nUnits, -std::numeric_limits<float>::infinity() );
-    GpuFilterBank filterBank = GpuFilterBank::fromHostArrays(
+    MultiFilterBank filterBank = MultiFilterBank::fromHostArrays(
         unitIds, unitChannelsInCarGroup, unitFilters, thresholds, N, templateLength );
 
-    GpuPreprocessor preprocessor( nCarCh, highpassCutoffHz, meta.sampleRateHz, applyHighpass, /*applyCar=*/true );
-    GpuConvolutionEngine engine( filterBank, nCarCh, chunkSamples, minSeparationSamples, detectionCapacity );
+    Preprocessor preprocessor( nCarCh, highpassCutoffHz, meta.sampleRateHz, applyHighpass, /*applyCar=*/true );
+    // detectionCapacity is gone with the GPU. It existed because the device
+    // wrote detections into a fixed-size buffer, so an offline scoring pass
+    // with all--infinity thresholds -- which reports EVERY NMS-accepted peak
+    // -- could silently overflow it and drop detections. A std::vector has no
+    // such cap, so that failure mode does not exist here.
+    (void)detectionCapacity;
+    MultiConvolutionEngine engine( filterBank, nCarCh, minSeparationSamples );
 
     std::ifstream inFh( binPath.c_str(), std::ios::binary );
     if( !inFh.is_open() )
@@ -62,9 +66,6 @@ std::vector<UnitPeaks> scoreAllUnitsOffline(
 
     std::vector<short> rawBuf( static_cast<size_t>( chunkSamples ) * meta.nSavedChans );
     std::vector<short> carChunkHost( static_cast<size_t>( chunkSamples ) * nCarCh );
-
-    short *d_raw = nullptr;
-    CUDA_CHECK( cudaMalloc( &d_raw, static_cast<size_t>( chunkSamples ) * nCarCh * sizeof(short) ) );
 
     std::vector<UnitPeaks> result( nUnits );
     long long streamOffset = 0;
@@ -92,11 +93,10 @@ std::vector<UnitPeaks> scoreAllUnitsOffline(
                 dstRow[c] = srcRow[carColumns[c]];
         }
 
-        CUDA_CHECK( cudaMemcpy( d_raw, carChunkHost.data(),
-            static_cast<size_t>( gotSamples ) * nCarCh * sizeof(short), cudaMemcpyHostToDevice ) );
-
-        std::vector<GpuPeakEvent> peaks = engine.processChunk(
-            preprocessor, d_raw, static_cast<size_t>( gotSamples ), streamOffset, /*stream=*/nullptr );
+        std::vector<double> pre = preprocessor.processChunk(
+            carChunkHost.data(), static_cast<size_t>( gotSamples ) );
+        std::vector<MultiPeakEvent> peaks = engine.processChunk(
+            pre.data(), static_cast<size_t>( gotSamples ), streamOffset );
 
         for( size_t p = 0; p < peaks.size(); ++p ) {
             int u = peaks[p].unitIndex;
@@ -112,16 +112,16 @@ std::vector<UnitPeaks> scoreAllUnitsOffline(
 
     // True end of this finite stream -- flush the tail engine.processChunk()
     // alone holds back forever waiting for future context that isn't coming
-    // (see GpuConvolutionEngine::flush()'s comment).
-    std::vector<GpuPeakEvent> flushed = engine.flush( /*stream=*/nullptr );
+    // (see ConvolutionEngine::flush()'s comment).
+    std::vector<MultiPeakEvent> flushed = engine.flush();
     for( size_t p = 0; p < flushed.size(); ++p ) {
         int u = flushed[p].unitIndex;
         result[u].sampleIdx.push_back( flushed[p].sampleIndex );
         result[u].score.push_back( flushed[p].score );
     }
 
-    cudaFree( d_raw );
-    filterBank.release();
-
+    // No release(): MultiFilterBank owns no device memory, so the whole
+    // two-owners-racing-to-free class of bug the GPU version guarded against
+    // does not exist.
     return result;
 }

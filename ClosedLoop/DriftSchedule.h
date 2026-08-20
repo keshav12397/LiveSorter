@@ -11,13 +11,13 @@
 // units run through calibrate_all_units.py (no drift awareness at all),
 // simply have an empty or absent schedule.
 //
-// This is intentionally NOT wired into ImecFetchThreadGPU.cu here. That file
+// This is intentionally NOT wired into ImecFetchThreadCpu.cpp here. That file
 // is being actively extended by another agent (NI/decision/socket code) and
 // this project's own README explains why a from-scratch rewrite of a
 // validated fetch loop is exactly the kind of change that has cost real
 // debugging time before. What's here is the minimal, self-contained piece:
 // load the schedule, and hand back events whose time has come. Wiring it in
-// is a ~5-line addition at the top of ImecFetchThreadGPU::fetchLoop()'s per-
+// is a ~5-line addition at the top of ImecFetchThreadCpu::fetchLoop()'s per-
 // chunk loop:
 //
 //     double nowS = <elapsed seconds since the fetch loop's t=0, same
@@ -29,14 +29,14 @@
 //
 // left for whoever owns that file next, since the channel-translation step
 // (raw SpikeGLX id -> CAR-group buffer index) has to reuse whatever helper
-// that file already has for the startup translation GpuFilterBank.h
+// that file already has for the startup translation MultiFilterBank.h
 // documents (see its d_channels comment) -- duplicating that mapping here
 // would be exactly the kind of second implementation this codebase has
 // already been burned by twice (see generate_filter.py's module docstring).
 struct DriftSchedule {
     struct Event {
         double t_s;                        // seconds from calibration recording start
-        int32_t unitIndex;                 // index into GpuFilterBank's unit arrays (NOT Kilosort cluster id)
+        int32_t unitIndex;                 // index into MultiFilterBank's unit arrays (NOT Kilosort cluster id)
         std::vector<int32_t> channels;      // raw SpikeGLX channel ids, length nChannelsPerUnit -- caller must translate
         std::vector<float> filter;          // length templateLength * nChannelsPerUnit, row-major [t][c]
         float threshold;

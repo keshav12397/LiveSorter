@@ -17,8 +17,8 @@
 // FilterGen/make_sim_session.py already writes a session whose spikes AND
 // syllable codes are both exactly known and both carried in the same file on
 // the same clock. This driver reads that file. What comes out is a complete,
-// self-consistent run of the real pipeline: real GpuPreprocessor, real
-// GpuConvolutionEngine (via OfflineScorer, which is those two unmodified),
+// self-consistent run of the real pipeline: real Preprocessor, real
+// MultiConvolutionEngine (via OfflineScorer, which is those two unmodified),
 // the real SyllableDecoder, and the real DecisionThread.
 //
 // What it is NOT
@@ -52,16 +52,14 @@
 #include <thread>
 #include <vector>
 
-#include <cuda_runtime.h>
 
 #include "SglxCppClient.h"
 
 #include "Config.h"
-#include "CudaUtil.h"
 #include "DigitalWordUtils.h"
 #include "Events.h"
 #include "EventPublisher.h"
-#include "GpuFilterBank.h"
+#include "MultiFilterBank.h"
 #include "OfflineScorer.h"
 #include "SglxMetaReader.h"
 #include "SyllableDecoder.h"
@@ -126,34 +124,26 @@ int main( int argc, char **argv )
         int templateLength   = cfg.getInt( "templateLength", 61 );
 
         // ---- filter bank ------------------------------------------------------
-        // Loaded through GpuFilterBank so the packed-file reader is not
-        // written a second time, then pulled back to the host because this
-        // driver needs the thresholds and unit ids on the CPU side anyway.
+        // Loaded through MultiFilterBank so the packed-file reader is not
+        // written a second time. The GPU version then had to copy all three
+        // arrays back off the device; they are already host vectors here.
         std::vector<int32_t> rawChannels;
         std::vector<float>   filters, thresholds;
         std::vector<int>     unitIds;
         int                  nUnits = 0;
         {
-            GpuFilterBank bank = GpuFilterBank::load( cfg.requireString( "filterDir" ),
-                                                       nChannelsPerUnit, templateLength );
-            nUnits  = bank.nUnits;
-            unitIds = bank.hostUnitIds;
-
-            rawChannels.resize( (size_t)nUnits * nChannelsPerUnit );
-            filters.resize( (size_t)nUnits * templateLength * nChannelsPerUnit );
-            thresholds.resize( nUnits );
-
-            CUDA_CHECK( cudaMemcpy( &rawChannels[0], bank.d_channels,
-                                     rawChannels.size() * sizeof(int32_t), cudaMemcpyDeviceToHost ) );
-            CUDA_CHECK( cudaMemcpy( &filters[0], bank.d_filters,
-                                     filters.size() * sizeof(float), cudaMemcpyDeviceToHost ) );
-            CUDA_CHECK( cudaMemcpy( &thresholds[0], bank.d_thresholds,
-                                     thresholds.size() * sizeof(float), cudaMemcpyDeviceToHost ) );
+            MultiFilterBank bank = MultiFilterBank::load( cfg.requireString( "filterDir" ),
+                                                          nChannelsPerUnit, templateLength );
+            nUnits      = bank.nUnits;
+            unitIds     = bank.hostUnitIds;
+            rawChannels = bank.channels;
+            filters     = bank.filters;
+            thresholds  = bank.thresholds;
         }
         std::cout << "  " << nUnits << " units\n";
 
         // Raw SpikeGLX channel id -> position within the CAR group. Same
-        // translation ImecFetchThreadGPU::fetchLoop() does, and required by
+        // translation ImecFetchThreadCpu::fetchLoop() does, and required by
         // scoreAllUnitsOffline's stated convention.
         std::vector<int32_t> chansInCarGroup( rawChannels.size() );
         for( size_t i = 0; i < rawChannels.size(); ++i ) {

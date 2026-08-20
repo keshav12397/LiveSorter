@@ -1,5 +1,5 @@
 // Equivalence test for MultiConvolutionEngine, the CPU batched engine that
-// replaced GpuConvolutionEngine.
+// replaced MultiConvolutionEngine.
 //
 // It asserts three properties, in increasing order of how badly a violation
 // would hurt:

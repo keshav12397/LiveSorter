@@ -14,7 +14,7 @@
 //
 // The constraint that shapes this whole class
 // -------------------------------------------
-// The producers are ImecFetchThreadGPU's fetch loop, NiFetchThread's fetch
+// The producers are ImecFetchThreadCpu's fetch loop, NiFetchThread's fetch
 // loop, and DecisionThread. All three are on the sample-critical path: the
 // server's ring is only ~8 s deep (see StreamAccountant.h), and per-chunk
 // blocking work has already had to be removed from the fetch loop once (the
@@ -84,7 +84,7 @@ private:
     std::atomic<long long> nPublished_, nDropped_;
 
     // uintptr_t rather than SOCKET so this header stays free of
-    // winsock2.h -- it is included by ImecFetchThreadGPU.cu, and pulling
+    // winsock2.h -- it is included by ImecFetchThreadCpu.cpp, and pulling
     // the Windows socket headers into an nvcc translation unit invites the
     // windows.h/min-max and winsock1-vs-2 include-order problems this
     // project has no reason to take on.

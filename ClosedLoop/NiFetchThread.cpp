@@ -72,7 +72,7 @@ void NiFetchThread::fetchLoop()
     SyncEdgeTracker syncTracker( sampleRate );
 
     // The debounce state machine used to live inline here; it now lives in
-    // SyllableDecoder.h so the IMEC-SY test path (ImecFetchThreadGPU with
+    // SyllableDecoder.h so the IMEC-SY test path (ImecFetchThreadCpu with
     // syllableSource=imecSy) runs this exact decoder rather than a second
     // copy of it. Pure extraction, no behaviour change -- see that header.
     SyllableDecoder decoder( fieldStartBit, fieldWidth, debounceSamples_ );

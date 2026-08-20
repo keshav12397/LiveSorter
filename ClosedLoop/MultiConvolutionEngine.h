@@ -28,7 +28,7 @@ struct MultiPeakEvent {
 
 // Runs the matched filter + windowed non-max suppression for every unit in a
 // MultiFilterBank, across a pool of worker threads. The CPU replacement for
-// GpuConvolutionEngine.
+// MultiConvolutionEngine.
 //
 // Why this is a thin shell and not an algorithm
 // ---------------------------------------------
@@ -38,7 +38,7 @@ struct MultiPeakEvent {
 // records that this codebase has twice silently lost detection
 // recall/precision to a re-derived-and-wrong version of that math -- once
 // from a hand-derived causal index shift with a miscomputed correction
-// constant. GpuConvolutionEngine was itself careful to be a port rather than
+// constant. MultiConvolutionEngine was itself careful to be a port rather than
 // a re-derivation for exactly that reason. Porting back to the CPU makes the
 // safe option available again: not "port it faithfully" but "call the
 // original".

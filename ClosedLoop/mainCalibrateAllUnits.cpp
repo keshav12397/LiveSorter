@@ -38,7 +38,6 @@
 #include <cmath>
 #include <chrono>
 
-#include <cuda_runtime.h>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -47,7 +46,6 @@
 #include <windows.h>
 #endif
 
-#include "CudaUtil.h"
 #include "Config.h"
 #include "SglxMetaReader.h"
 #include "KilosortReader.h"
@@ -340,14 +338,11 @@ int main( int argc, char **argv )
         std::cout << "  " << nPrepOk << "/" << candidates.size() << " units prepped successfully.\n";
         lap( "per-unit prep" );
 
-        // ---- Phase 2: batched GPU noise covariance, ONE kernel launch for
-        // every prepped unit -- the whole point of this port (see NoiseCovariance.h).
-        std::cout << "Uploading train-split preprocessed data to GPU ("
-                   << (static_cast<double>( splitT ) * nCarCh * sizeof(float) / 1e9) << " GB)...\n";
-        float *d_trainData = nullptr;
-        size_t nTrainFloats = static_cast<size_t>( splitT ) * nCarCh;
-        CUDA_CHECK( cudaMalloc( &d_trainData, nTrainFloats * sizeof(float) ) );
-        CUDA_CHECK( cudaMemcpy( d_trainData, trainView.row( 0 ), nTrainFloats * sizeof(float), cudaMemcpyHostToDevice ) );
+        // ---- Phase 2: batched noise covariance across every prepped unit
+        // (see NoiseCovariance.h). Reads the scratch memmap in place -- the
+        // GPU version had to copy the whole train split to the device first,
+        // which for a 30-minute session was several GB and put a hard ceiling
+        // on session length that no longer exists.
 
         std::vector<int> unitChannelsFlat;
         std::vector<SpikeFreeSegment> segmentsFlat;
@@ -381,12 +376,10 @@ int main( int argc, char **argv )
         }
 
         int nCovUnits = static_cast<int>( prepIdxForCovUnit.size() );
-        std::cout << "Running batched GPU noise covariance for " << nCovUnits << " units (one kernel launch)...\n";
+        std::cout << "Running batched noise covariance for " << nCovUnits << " units...\n";
         std::vector<std::vector<double> > Rmats = computeNoiseCovarianceBatched(
-            d_trainData, splitT, nCarCh, templateLength, nChannels,
+            trainView.row( 0 ), splitT, nCarCh, templateLength, nChannels,
             unitChannelsFlat, segmentsFlat, segmentOffsets, segmentCounts, nCovUnits );
-
-        cudaFree( d_trainData );
         lap( "batched noise covariance" );
 
         // ---- Phase 3 (LCMV solve): per unit, CPU -----------------------------

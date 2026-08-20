@@ -3,11 +3,9 @@
 #include <fstream>
 #include <stdexcept>
 #include <algorithm>
-#include <cuda_runtime.h>
 
-#include "CudaUtil.h"
 #include "SglxMetaReader.h"
-#include "GpuPreprocessor.h"
+#include "Preprocessor.h"
 
 
 long long streamPreprocessToScratch(
@@ -44,16 +42,13 @@ long long streamPreprocessToScratch(
     if( !outFh.is_open() )
         throw std::runtime_error( "streamPreprocessToScratch: could not create '" + outScratchPath + "'" );
 
-    GpuPreprocessor preprocessor( nCarCh, highpassCutoffHz, meta.sampleRateHz, applyHighpass, /*applyCar=*/true );
+    Preprocessor preprocessor( nCarCh, highpassCutoffHz, meta.sampleRateHz, applyHighpass, /*applyCar=*/true );
 
     std::vector<short>  rawRow( meta.nSavedChans );
     std::vector<short>  carChunkHost( static_cast<size_t>( chunkSamples ) * nCarCh );
+    // Scratch stays float32 on disk: that is the dtype the whole all-units
+    // path is calibrated in (see FastMatchedFilter.h), and it halves the file.
     std::vector<float>  outChunkHost( static_cast<size_t>( chunkSamples ) * nCarCh );
-
-    short *d_raw = nullptr;
-    float *d_out = nullptr;
-    CUDA_CHECK( cudaMalloc( &d_raw, static_cast<size_t>( chunkSamples ) * nCarCh * sizeof(short) ) );
-    CUDA_CHECK( cudaMalloc( &d_out, static_cast<size_t>( chunkSamples ) * nCarCh * sizeof(float) ) );
 
     long long totalWritten = 0;
     std::vector<short> rawBuf( static_cast<size_t>( chunkSamples ) * meta.nSavedChans );
@@ -81,13 +76,12 @@ long long streamPreprocessToScratch(
                 dstRow[c] = srcRow[carColumns[c]];
         }
 
-        CUDA_CHECK( cudaMemcpy( d_raw, carChunkHost.data(),
-            static_cast<size_t>( gotSamples ) * nCarCh * sizeof(short), cudaMemcpyHostToDevice ) );
-
-        preprocessor.processChunk( d_raw, static_cast<size_t>( gotSamples ), d_out, /*stream=*/nullptr );
-
-        CUDA_CHECK( cudaMemcpy( outChunkHost.data(), d_out,
-            static_cast<size_t>( gotSamples ) * nCarCh * sizeof(float), cudaMemcpyDeviceToHost ) );
+        // Preprocessor works in double (it shares ButterworthHighpass with the
+        // single-target path); narrow to float only on the way to disk.
+        std::vector<double> pre = preprocessor.processChunk(
+            carChunkHost.data(), static_cast<size_t>( gotSamples ) );
+        for( size_t i = 0; i < pre.size(); ++i )
+            outChunkHost[i] = static_cast<float>( pre[i] );
 
         outFh.write( reinterpret_cast<const char*>( outChunkHost.data() ),
                      static_cast<std::streamsize>( gotSamples ) * nCarCh * sizeof(float) );
@@ -97,9 +91,6 @@ long long streamPreprocessToScratch(
         if( gotSamples < samplesToRead )
             break; // short read -- reached EOF
     }
-
-    cudaFree( d_raw );
-    cudaFree( d_out );
 
     return totalWritten;
 }

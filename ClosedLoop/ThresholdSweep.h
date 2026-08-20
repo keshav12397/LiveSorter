@@ -28,7 +28,7 @@ struct ThresholdSweepResult {
 };
 
 // peakSampleIdx/peakScores: every candidate peak (ALL windowed-NMS-accepted
-// local maxima, not threshold-gated -- see GpuFilterBank::fromHostArrays's
+// local maxima, not threshold-gated -- see MultiFilterBank::fromHostArrays's
 // -infinity-threshold trick), same convention as
 // threshold_sweep_real.find_all_peaks's output. targetSpikesSorted: the
 // unit's own held-out test-split spike times (ascending). window: hit/FP
