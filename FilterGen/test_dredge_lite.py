@@ -197,5 +197,122 @@ def main():
     return 0 if ok else 1
 
 
+# --------------------------------------------------------------------- #
+# build_raster: the representation, not the algebra
+# --------------------------------------------------------------------- #
+
+def synth_recording(motion_um, fs=3000.0, duration_s=300.0, n_rows=24,
+                    row_pitch_um=15.0, y0_um=435.0, n_units=10, seed=0):
+    """A tiny fake recording: two channel columns per row, Gaussian spatial
+    footprints, one biphasic waveform, spikes at known times, and a rigid
+    drift of `motion_um(t)`.
+
+    Deliberately goes through build_raster rather than constructing a raster
+    directly, because every other test here builds its raster by hand and
+    that is exactly the gap the comb bug lived in. fs is low so the array
+    stays small; build_raster only uses fs to size time bins.
+    """
+    rng = np.random.default_rng(seed)
+    n_chan = n_rows * 2
+    chan_y = np.repeat(y0_um + row_pitch_um * np.arange(n_rows), 2)
+    n_samp = int(duration_s * fs)
+    data = rng.normal(0.0, 0.5, size=(n_samp, n_chan)).astype(np.float32)
+
+    tt = np.arange(61) - 20
+    wave = -np.exp(-0.5 * (tt / 3.0) ** 2) + 0.4 * np.exp(-0.5 * ((tt - 8) / 5.0) ** 2)
+
+    centers = rng.uniform(chan_y.min() + 60, chan_y.max() - 60, size=n_units)
+    amps = rng.uniform(8.0, 40.0, size=n_units)
+    st, cl = [], []
+    for u in range(n_units):
+        times = np.sort(rng.integers(40, n_samp - 80, size=900))
+        for t in times:
+            off = np.interp(t / fs, np.arange(len(motion_um)) * duration_s / len(motion_um),
+                            motion_um)
+            prof = amps[u] * np.exp(-0.5 * ((chan_y - (centers[u] + off)) / 22.0) ** 2)
+            data[t - 20:t + 41, :] += wave[:, None] * prof[None, :]
+        st.append(times)
+        cl.append(np.full(times.size, u))
+    return data, np.concatenate(st), np.concatenate(cl), chan_y, fs
+
+
+def test_build_raster_sees_sub_pitch_drift():
+    """Drift SMALLER than the channel pitch must still be recovered.
+
+    This is the test the comb bug needed and did not have. build_raster puts
+    amplitude on a depth grid finer than the channel pitch; if it scatters
+    each channel onto its own bin instead of interpolating between rows, the
+    raster is a comb with energy every `row_pitch/depth_bin` bins. A comb
+    cross-correlates to a delta -- collapsing rather than decaying away from
+    the true shift -- so argmax pins to zero and the estimate is flat.
+
+    The drift here is 8 um against a 15 um pitch and a 5 um bin, so it is
+    a multiple of NEITHER. That matters: the simulator's 15 um drift was
+    exactly one row and three bins, the comb realigned perfectly, and this
+    whole failure mode stayed invisible through a full validation.
+    """
+    n_time = 30
+    true = 8.0 * np.linspace(0.0, 1.0, n_time)
+    true = true - true.mean()
+    data, st, cl, chan_y, fs = synth_recording(true)
+
+    raster, depth_grid, t_center = dl.build_raster(
+        data, st, cl, chan_y, fs, 61, 20, bin_s=10.0, depth_bin_um=5.0,
+        min_spikes_per_bin=4)
+
+    # The representation itself: no comb. With 15 um rows on a 5 um grid a
+    # comb puts amplitude on every third bin and exactly zero on the other
+    # two, so ~2/3 of bins inside the active depth range are zero.
+    #
+    # Scored on the ACTIVE range only -- between the first and last nonzero
+    # bin. Zeros outside it are not a comb, they are depths no unit reaches,
+    # and build_raster's noise-floor subtraction zeroes channels far from
+    # every unit on purpose. Counting those would make the threshold depend
+    # on how the fake units happened to be scattered.
+    col = raster[:, 0]
+    nz = np.flatnonzero(col)
+    assert nz.size > 8, "no signal in the raster at all"
+    active = col[nz[0]:nz[-1] + 1]
+    zero_frac = float(np.mean(active == 0.0))
+    assert zero_frac < 0.20, (
+        f"raster looks like a comb: {zero_frac:.1%} of bins in the active "
+        f"depth range are exactly 0 (a comb gives ~67%)")
+
+    _t, motion = dl.estimate_motion(raster, depth_grid, t_center,
+                                    max_disp_um=40.0, min_corr=0.1)
+    est = np.asarray(motion)[0]
+    est = est - est.mean()
+
+    err = float(np.sqrt(np.mean((est - true) ** 2)))
+    zero_err = float(np.sqrt(np.mean(true ** 2)))
+    corr = float(np.corrcoef(est, true)[0, 1])
+
+    # Asserted on SHAPE and non-flatness, not on rmse, and the reason is a
+    # real limitation rather than a loose test.
+    #
+    # The comb failure is total: it returns a flat trajectory, so ptp ~ 0
+    # and the correlation is undefined. Either assertion below catches it
+    # with enormous margin.
+    #
+    # rmse is deliberately not asserted tightly because this estimator
+    # OVERSHOOTS the drift amplitude on sparse, noisy populations -- here
+    # ~12.7 um recovered for 8.0 um true, and a 6-unit subset of a real
+    # session read 40.3 um against ~15 um truth. On Lav69's full 163-unit
+    # population the gain was accurate (5.94 vs KS4's 6.50), so the bias
+    # shrinks as units are pooled, which is consistent with it coming from
+    # noise in each pair's correlation peak biasing the argmax outward.
+    # Pinning rmse here would encode this synthetic setup's particular
+    # amount of overshoot as if it were correct. See DRIFT_AWARE_RESULTS.md;
+    # the practical consequence is that a drift SPAN from few units must not
+    # be trusted to size anything.
+    assert np.ptp(est) > 0.4 * np.ptp(true), (
+        f"estimate is flat -- the comb failure: ptp {np.ptp(est):.2f} "
+        f"vs true {np.ptp(true):.2f}")
+    assert corr > 0.7, f"trajectory shape is wrong: corr {corr:+.3f}"
+    assert err < zero_err, f"rmse {err:.2f} um, worse than estimating zero ({zero_err:.2f})"
+    print(f"  sub-pitch drift: true ptp {np.ptp(true):.2f}  est ptp {np.ptp(est):.2f}  "
+          f"corr {corr:+.3f}  rmse {err:.2f} um (zero-estimate {zero_err:.2f})")
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
