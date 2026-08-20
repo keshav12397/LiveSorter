@@ -131,16 +131,43 @@ def build_raster(data, spike_times, spike_clusters, chan_y, fs,
     depth_grid = np.arange(y_lo, y_hi + depth_bin_um, depth_bin_um)
     raster = np.zeros((depth_grid.size, n_time), dtype=np.float64)
 
-    # Each channel's amplitude is spread linearly between the two grid points
-    # that bracket its depth. Nearest-neighbour assignment instead would
-    # quantise every channel to a grid point and make the raster's structure
-    # a function of grid phase, which then shows up as a bias in the
-    # cross-correlation peak.
-    pos = np.clip((np.asarray(chan_y, dtype=np.float64) - y_lo) / depth_bin_um,
-                  0, depth_grid.size - 1 - 1e-9)
-    i0 = np.floor(pos).astype(int)
-    frac = pos - i0
-    i1 = np.minimum(i0 + 1, depth_grid.size - 1)
+    # The amplitude profile is INTERPOLATED across depth, not scattered onto
+    # the bins the channels happen to occupy. This is the difference between
+    # an estimator that can see sub-pitch drift and one that cannot.
+    #
+    # What the obvious version does wrong. Spreading each channel's
+    # amplitude linearly between the two grid points bracketing its depth
+    # looks like it handles the general case, and it does -- unless the
+    # channel pitch is a multiple of the bin size, which it usually is
+    # (15 um rows, 5 um bins). Then every channel lands exactly on a grid
+    # point, the interpolation weight is 0 for all of them, and the raster
+    # becomes a COMB: energy at every third bin, nothing between.
+    #
+    # A comb cannot be cross-correlated at sub-pitch shifts. Sliding it by
+    # one bin moves every tooth into a gap, so correlation does not decay
+    # smoothly away from the true shift, it collapses -- measured on Lav69:
+    # +0.99 at zero shift, -0.24 at +-5 um, -0.24 at +-10 um. The peak is a
+    # delta, argmax pins to 0 for every pair, D comes back all-zero, and the
+    # trajectory is flat. Only shifts that are exact multiples of the
+    # channel pitch can ever align.
+    #
+    # This survived its own unit tests and a full simulator validation
+    # because the simulated drift was 15 um -- exactly one channel row,
+    # exactly three bins -- so the comb realigned perfectly and the reported
+    # 1.05 um error was measured at the one displacement the representation
+    # can express. Real drift of 6.5 um is not a multiple of the pitch and
+    # the estimator returned identically zero.
+    #
+    # So: average the channels sharing a row (the columns are at the same
+    # depth and differ only in x), then linearly interpolate that
+    # row-resolved profile onto the fine grid. The result is the continuous
+    # function the amplitudes are samples of, and shifting it by any amount
+    # changes it smoothly.
+    chan_y = np.asarray(chan_y, dtype=np.float64)
+    y_rows = np.unique(chan_y)
+    row_of = np.searchsorted(y_rows, chan_y)
+    row_n = np.bincount(row_of, minlength=y_rows.size).astype(np.float64)
+    row_n[row_n == 0] = 1.0
 
     for uid in unit_ids:
         st = spike_times[spike_clusters == uid]
@@ -163,8 +190,9 @@ def build_raster(data, spike_times, spike_clusters, chan_y, fs,
             if not np.any(amp > 0):
                 continue
             amp = amp * float(bin_st.size)
-            np.add.at(raster, (i0, int(b)), amp * (1.0 - frac))
-            np.add.at(raster, (i1, int(b)), amp * frac)
+            row_amp = np.bincount(row_of, weights=amp,
+                                  minlength=y_rows.size) / row_n
+            raster[:, int(b)] += np.interp(depth_grid, y_rows, row_amp)
 
     return raster, depth_grid, t_center
 
@@ -241,8 +269,51 @@ def pairwise_displacements(raster, depth_bin_um, max_disp_um=100.0,
             good = denom > 0
             cc[k, good] = (r @ b[:, good]) / denom[good]
         best = np.argmax(cc, axis=0)
-        peak = cc[best, np.arange(block.shape[1])]
-        disp = shifts[best] * depth_bin_um
+        cols = np.arange(block.shape[1])
+        peak = cc[best, cols]
+
+        # Sub-bin refinement, and it is not a polish -- without it this
+        # function cannot see drift smaller than one depth bin AT ALL.
+        #
+        # The shift search is over integer bins, so `shifts[best]` is
+        # quantised to depth_bin_um. On a real Lav69 recording the true
+        # drift is ~6.5 um against a 5 um bin, every pair's argmax landed on
+        # lag 0, D came back identically zero, and the solve dutifully
+        # returned a flat trajectory. Nothing looked broken: the
+        # correlations were excellent (mean 0.97) precisely BECAUSE the
+        # columns nearly align at zero shift. A simulator run at 15 um (3
+        # bins) cleared the floor and hid this completely.
+        #
+        # Fit a parabola through the correlation at (best-1, best, best+1)
+        # and take its vertex. Standard sub-sample peak location; the three
+        # values are already computed, so this is arithmetic on a (k,)
+        # vector, not another correlation pass.
+        #
+        # Guards, each for a real case rather than defensiveness:
+        #   - interior only. At an endpoint there is no bracketing triple
+        #     and the vertex is unconstrained.
+        #   - finite neighbours. cc is pre-filled with -inf for shifts whose
+        #     overlap fell below 4 rows.
+        #   - denom < 0 keeps only genuine maxima (concave-down); a
+        #     near-zero denominator is a flat ridge whose vertex flies off.
+        #   - clip to +-0.5 bin. A vertex further than half a bin from the
+        #     argmax contradicts the argmax, so trust the integer answer.
+        frac = np.zeros(block.shape[1], dtype=np.float64)
+        interior = (best > 0) & (best < shifts.size - 1)
+        if np.any(interior):
+            ii = np.where(interior)[0]
+            c0 = cc[best[ii], ii]
+            cm = cc[best[ii] - 1, ii]
+            cp = cc[best[ii] + 1, ii]
+            ok = np.isfinite(cm) & np.isfinite(cp) & np.isfinite(c0)
+            denom = cm - 2.0 * c0 + cp
+            ok &= denom < -1e-12
+            if np.any(ok):
+                f = np.zeros_like(denom)
+                f[ok] = 0.5 * (cm[ok] - cp[ok]) / denom[ok]
+                frac[ii] = np.clip(f, -0.5, 0.5)
+
+        disp = (shifts[best] + frac) * depth_bin_um
 
         peak = np.where(peak >= min_corr, np.maximum(peak, 0.0), 0.0)
         disp = np.where(peak > 0.0, disp, 0.0)
