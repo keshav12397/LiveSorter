@@ -366,3 +366,137 @@ def motion_at(t_query_s, y_query_um, t_center_s, motion, win_centers_um):
                 float(np.max(win_centers_um)))
     return np.array([np.interp(y, win_centers_um, per_win[:, k])
                      for k in range(t_query_s.size)])
+
+
+# --------------------------------------------------------------------- #
+# 5. Head-to-head against the per-unit estimator
+# --------------------------------------------------------------------- #
+
+def _main():
+    """Score this estimator against make_sim_session.py's known probe motion,
+    and against drift_estimate.unit_trajectory on the same data.
+
+    The comparison is the point. Either estimator alone produces a number
+    that looks fine in isolation; what decides whether pooling was worth
+    implementing is which one has less error on the same recording, and by
+    how much relative to the drift being measured.
+
+    Two truths are reported because they answer different questions:
+      probe  -- the common-mode motion. What this method estimates, and the
+                only thing it *can* estimate.
+      total  -- probe plus each unit's private residual. What a per-unit
+                tracker is trying to estimate, and what a drift-aware filter
+                would ideally follow.
+    Scoring a pooled estimator against `total` and calling the gap a failure
+    would be charging it for a quantity outside its model, so both are
+    printed rather than one being picked here.
+    """
+    import argparse
+    import threshold_sweep_real as tsr
+    import drift_estimate as de
+
+    ap = argparse.ArgumentParser(
+        description="dredge_lite vs per-unit tracking, against known truth.")
+    ap.add_argument("--ks-dir", required=True)
+    ap.add_argument("--bin-path", required=True)
+    ap.add_argument("--meta-path")
+    ap.add_argument("--channel-map-json", required=True)
+    ap.add_argument("--truth", required=True, help="sim_truth.npz")
+    ap.add_argument("--template-length", type=int, default=61)
+    ap.add_argument("--template-offset", type=int, default=20)
+    ap.add_argument("--fc", type=float, default=300.0)
+    ap.add_argument("--bin-s", type=float, default=20.0)
+    ap.add_argument("--depth-bin-um", type=float, default=5.0)
+    ap.add_argument("--max-disp-um", type=float, default=80.0)
+    ap.add_argument("--max-lag-bins", type=int, default=0)
+    ap.add_argument("--min-corr", type=float, default=0.1)
+    ap.add_argument("--n-windows", type=int, default=1)
+    ap.add_argument("--min-spikes", type=int, default=60)
+    ap.add_argument("--max-units", type=int, default=0)
+    ap.add_argument("--scratch-dir")
+    ap.add_argument("--seed", type=int, default=0)
+    args = ap.parse_args()
+
+    rng = np.random.default_rng(args.seed)
+    args.filter = True
+    args.car = True
+    args.causal_highpass = True
+    spike_t, spike_cl, data, np_ch, fs = tsr.load_and_prepare(
+        args, rng, dtype=np.float32)
+
+    positions = gf.load_channel_positions_json(args.channel_map_json)
+    chan_y = de.channel_y_for_group(np_ch, positions)
+
+    truth = np.load(args.truth, allow_pickle=True)
+    t_uid = list(truth["unit_ids"])
+    t_grid = truth["t_grid_s"]
+    t_total = truth["drift_position_um"]
+    t_probe = (truth["probe_offset_um"] if "probe_offset_um" in truth
+               else np.zeros_like(t_total))
+    t_y0 = truth["y0_um"]
+
+    ids, counts = np.unique(spike_cl, return_counts=True)
+    order = np.argsort(counts)[::-1]
+    cand = [int(ids[i]) for i in order if counts[i] >= args.min_spikes]
+    if args.max_units:
+        cand = cand[:args.max_units]
+
+    print(f"building raster over {len(cand)} units, {args.bin_s:.0f} s bins...")
+    raster, depth_grid, t_c = build_raster(
+        data, spike_t, spike_cl, chan_y, fs, args.template_length,
+        args.template_offset, unit_ids=cand, bin_s=args.bin_s,
+        depth_bin_um=args.depth_bin_um, rng=rng)
+    print(f"  raster {raster.shape[0]} depths x {raster.shape[1]} time bins, "
+          f"{100.0 * np.mean(raster > 0):.0f}% occupied")
+
+    _, motion = estimate_motion(raster, depth_grid, t_c,
+                                n_windows=args.n_windows,
+                                max_disp_um=args.max_disp_um,
+                                max_lag_bins=args.max_lag_bins,
+                                min_corr=args.min_corr)
+    wc = window_centers_um(depth_grid, args.n_windows)
+    print(f"  estimated motion span {np.ptp(motion):.1f} um across "
+          f"{args.n_windows} window(s)")
+
+    def rms_centered(a, b):
+        e = (a - np.mean(a)) - (b - np.mean(b))
+        return float(np.sqrt(np.mean(e ** 2)))
+
+    print(f"\n{'unit':>5} {'probe span':>10} {'dredge':>8} {'per-unit':>9} "
+          f"{'vs total':>9}")
+    rows = []
+    for uid in cand:
+        i = t_uid.index(uid)
+        st = spike_t[spike_cl == uid]
+
+        t_u, y_u = de.unit_trajectory(data, st, chan_y, args.template_length,
+                                      args.template_offset, fs, rng=rng)
+        if t_u.size < 2:
+            continue
+
+        probe_at_u = np.interp(t_u, t_grid, t_probe[i])
+        total_at_u = np.interp(t_u, t_grid, t_total[i])
+        dredge_at_u = motion_at(t_u, float(t_y0[i]), t_c, motion, wc)
+
+        e_dredge = rms_centered(dredge_at_u, probe_at_u)
+        e_unit = rms_centered(y_u, probe_at_u)
+        e_dredge_total = rms_centered(dredge_at_u, total_at_u)
+        span = float(np.ptp(probe_at_u))
+        print(f"{uid:>5} {span:10.1f} {e_dredge:8.2f} {e_unit:9.2f} "
+              f"{e_dredge_total:9.2f}")
+        rows.append((span, e_dredge, e_unit, e_dredge_total))
+
+    if not rows:
+        print("no units scored")
+        return
+    a = np.asarray(rows)
+    print(f"\nn={len(rows)}  median true probe span {np.median(a[:, 0]):.1f} um")
+    print(f"  vs probe motion : dredge_lite {np.median(a[:, 1]):5.2f} um   "
+          f"per-unit {np.median(a[:, 2]):5.2f} um")
+    print(f"  vs total motion : dredge_lite {np.median(a[:, 3]):5.2f} um")
+    better = 100.0 * np.mean(a[:, 1] < a[:, 2])
+    print(f"  dredge_lite beats per-unit tracking on {better:.0f}% of units")
+
+
+if __name__ == "__main__":
+    _main()
