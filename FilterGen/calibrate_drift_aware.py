@@ -127,7 +127,6 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 
 import drift_estimate as de
-import dredge_lite as dl
 import generate_filter as gf
 import motion_correct as mc
 import threshold_sweep_real as tsr
@@ -410,7 +409,7 @@ def _fit_one_unit(target_id, spike_count, mode):
 # so its 'global' mode reproduces that script's own baseline as an internal
 # check, and 'segmented'/'registered' can be read directly against it.
 #
-# Trajectory source: dredge_lite's pooled, common-mode estimate, built once
+# Trajectory source: the pooled, common-mode estimate, built once
 # from the TRAIN half only (never the test half -- that would leak future
 # drift into calibration) and shared by every unit, rather than
 # drift_estimate.unit_trajectory's noisy per-unit centroid. See README.md
@@ -503,55 +502,25 @@ def build_pooled_trajectory(data_train, spike_t_train, spike_cl_train, chan_y,
     Returns (t_c, motion, win_centers); `motion` is (n_windows, n_time),
     rigid when n_windows == 1.
 
-    Two estimators, selected by --motion-estimator, with the same contract.
-
-    'com' (default) pools per-unit amplitude-weighted centroid depths.
-    'dredge' cross-correlates an amplitude raster. The default is 'com'
-    because it measured better on both sessions available and costs far
-    less -- simulator rmse 0.10 um against dredge's 1.03 with truth known,
-    Lav69 corr 0.962 against 0.845 with KS4's dshift as reference, ~11 s of
-    localisation against a raster build plus an O(n_time^2) sweep. See
-    drift_estimate.pooled_com_motion for the full comparison and for why
-    monopolar triangulation was tried and rejected.
-
-    'dredge' is kept rather than deleted because the two fail differently:
-    the centroid needs each unit to be localisable on its own, while the
-    raster registers the population's summed profile and does not care
-    whether any single unit is well isolated. On a recording dominated by
-    overlapping low-amplitude units that difference could invert the
-    ranking, and there is no session here that tests it.
+    The estimator is `drift_estimate.pooled_com_motion`: track each unit's
+    amplitude-weighted centroid depth, convert to a displacement by
+    subtracting that unit's own mean, and median across units. Its docstring
+    carries the measurements that chose it over the raster-registration
+    alternative that used to live here.
     """
-    if a.get("motion_estimator", "com") == "com":
-        t_c, motion, win_centers = de.pooled_com_motion(
-            data_train, spike_t_train, spike_cl_train, chan_y,
-            a["template_length"], a["template_offset"], fs, candidates,
-            bin_s=a["dredge_bin_s"], spikes_per_bin=a["spikes_per_bin"],
-            n_windows=a["dredge_n_windows"],
-            window_overlap=a["dredge_window_overlap"])
-        print(f"pooled trajectory [com]: {t_c.size} bins, "
-              f"{a['dredge_n_windows']} window(s), "
-              f"span {float(np.ptp(motion)):.1f} um")
-        return t_c, motion, win_centers
-
-    raster, depth_grid, t_c = dl.build_raster(
-        data_train, spike_t_train, spike_cl_train, chan_y, fs,
-        a["template_length"], a["template_offset"], unit_ids=candidates,
-        bin_s=a["dredge_bin_s"], depth_bin_um=a["dredge_depth_bin_um"])
-    t_c, motion = dl.estimate_motion(
-        raster, depth_grid, t_c, n_windows=a["dredge_n_windows"],
-        window_overlap=a["dredge_window_overlap"],
-        max_disp_um=a["dredge_max_disp_um"], min_corr=a["dredge_min_corr"])
-    win_centers = dl.window_centers_um(depth_grid, a["dredge_n_windows"],
-                                       a["dredge_window_overlap"])
-    print(f"pooled trajectory [dredge]: {t_c.size} bins, "
-          f"{a['dredge_n_windows']} window(s), "
-          f"span {float(np.ptp(motion)):.1f} um")
+    t_c, motion, win_centers = de.pooled_com_motion(
+        data_train, spike_t_train, spike_cl_train, chan_y,
+        a["template_length"], a["template_offset"], fs, candidates,
+        bin_s=a["motion_bin_s"], spikes_per_bin=a["spikes_per_bin"],
+        n_windows=a["motion_n_windows"],
+        window_overlap=a["motion_window_overlap"])
+    print(f"pooled trajectory: {t_c.size} bins, {a['motion_n_windows']} "
+          f"window(s), span {float(np.ptp(motion)):.1f} um")
     return t_c, motion, win_centers
-
 
 def _approx_unit_depth(data_train, target_train, chan_y, a, rng):
     """One coarse depth estimate for a unit -- used only to pick which
-    nonrigid dredge window applies to it (n_windows > 1), never to drive
+    nonrigid motion window applies to it (n_windows > 1), never to drive
     segmentation itself (that stays on the pooled trajectory). A single
     whole-train mean waveform is enough for that: unlike per-bin tracking,
     it is not trying to resolve motion, just a resting depth.
@@ -565,7 +534,7 @@ def _fit_one_unit_chrono(target_id, spike_count, mode):
     """Runs in a worker process. 'global' fits one filter on all train-half
     spikes/data (== calibrate_all_units.py's own protocol, as a same-code
     internal check). 'segmented'/'registered' segment the train half using
-    the pooled dredge trajectory and fit+deploy only the LAST segment --
+    the pooled trajectory and fit+deploy only the LAST segment --
     see the module-level comment above this section for why only the last.
     """
     data = _worker["data"]
@@ -627,7 +596,7 @@ def _fit_one_unit_chrono(target_id, spike_count, mode):
                 y_pooled = motion_pooled[0]
             else:
                 y0 = _approx_unit_depth(data[:split_t], target_train, chan_y, a, rng)
-                y_pooled = dl.motion_at(t_c_pooled, y0, t_c_pooled,
+                y_pooled = de.motion_at(t_c_pooled, y0, t_c_pooled,
                                         motion_pooled, win_centers)
             segs_train = de.segment_from_trajectory(
                 t_c_pooled, y_pooled, target_train, a["fs"], split_t,
@@ -888,24 +857,20 @@ def main():
                          "drift_estimate.unit_trajectory's per-unit "
                          "trajectory rather than the pooled one, unchanged "
                          "from before this flag existed.")
-    ap.add_argument("--motion-estimator", choices=["com", "dredge"],
-                    default="com",
-                    help="How the pooled trajectory is built. 'com' pools "
-                         "per-unit centroid depths (default: more accurate "
-                         "and far cheaper on every session measured so far). "
-                         "'dredge' cross-correlates an amplitude raster. See "
-                         "drift_estimate.pooled_com_motion.")
-    ap.add_argument("--dredge-bin-s", type=float, default=20.0,
-                    help="Chronological mode only: dredge_lite raster time-"
-                         "bin width in seconds.")
-    ap.add_argument("--dredge-depth-bin-um", type=float, default=5.0)
-    ap.add_argument("--dredge-max-disp-um", type=float, default=80.0)
-    ap.add_argument("--dredge-min-corr", type=float, default=0.1)
-    ap.add_argument("--dredge-n-windows", type=int, default=1,
-                    help="1 = rigid (default -- see README.md 'Rigid or "
-                         "nonrigid?'). >1 = nonrigid, dredge_lite's "
-                         "overlapping-window estimate.")
-    ap.add_argument("--dredge-window-overlap", type=float, default=0.5)
+    ap.add_argument("--motion-bin-s", type=float, default=20.0,
+                    help="Chronological mode only: time-bin width, in "
+                         "seconds, for the pooled motion trajectory.")
+    ap.add_argument("--motion-n-windows", type=int, default=1,
+                    help="1 estimates one rigid trajectory for the whole "
+                         "probe. More cuts the depth axis into overlapping "
+                         "windows and pools units within each by their own "
+                         "depth -- the nonrigid case, where tissue near one "
+                         "end of the probe moves differently from the other.")
+    ap.add_argument("--motion-window-overlap", type=float, default=0.5,
+                    help="Fractional overlap between adjacent depth windows "
+                         "when --motion-n-windows > 1. Windows overlap so the "
+                         "motion field has no discontinuity at a boundary and "
+                         "each window keeps enough units to average.")
     args = ap.parse_args()
 
     rng = np.random.default_rng(args.seed)
@@ -956,23 +921,18 @@ def main():
 
     t_c_pooled = motion_pooled = win_centers = None
     if args.split_mode == "chronological" and any(m != "global" for m in modes):
-        dredge_args = dict(template_length=args.template_length,
+        motion_args = dict(template_length=args.template_length,
                            template_offset=args.template_offset,
-                           motion_estimator=args.motion_estimator,
                            spikes_per_bin=args.spikes_per_bin,
-                           dredge_bin_s=args.dredge_bin_s,
-                           dredge_depth_bin_um=args.dredge_depth_bin_um,
-                           dredge_n_windows=args.dredge_n_windows,
-                           dredge_window_overlap=args.dredge_window_overlap,
-                           dredge_max_disp_um=args.dredge_max_disp_um,
-                           dredge_min_corr=args.dredge_min_corr)
-        print(f"Building pooled [{args.motion_estimator}] trajectory "
-              f"from the train half...")
+                           motion_bin_s=args.motion_bin_s,
+                           motion_n_windows=args.motion_n_windows,
+                           motion_window_overlap=args.motion_window_overlap)
+        print("Building pooled trajectory from the train half...")
         spike_t_train = spike_t[spike_t < split_t]
         spike_cl_train = spike_cl[spike_t < split_t]
         t_c_pooled, motion_pooled, win_centers = build_pooled_trajectory(
             data[:split_t], spike_t_train, spike_cl_train, chan_y, fs,
-            candidates, dredge_args)
+            candidates, motion_args)
 
     # Release the parent's read-write handle before workers open their own
     # read-only ones -- on Windows a lingering w+ memmap makes concurrent

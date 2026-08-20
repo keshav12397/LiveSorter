@@ -585,7 +585,7 @@ themselves is now OPEN, not negative: they were only ever measured against
 independent per-unit drift under an interpolation split, and on coherent
 drift under a chronological split there is a 0.22 f1 penalty for them to go
 after. They should be re-measured on the paired sessions above, with
-`dredge_lite`'s pooled trajectory rather than the per-unit one that reports
+the pooled trajectory rather than the per-unit one that reports
 up to 71 um of motion on a session with none. The remaining 0.022 penalty is close to the noise between
 subgroups. The segmented/registered code is kept because a negative result
 is only meaningful alongside the code that produced it, and because faster
@@ -691,151 +691,105 @@ documents the call-site addition, including why the channel-id translation
 must reuse that file's existing raw-id -> CAR-group mapping rather than
 duplicating it.
 
-## Pooled motion estimation (dredge_lite.py)
+## Pooled motion estimation (drift_estimate.pooled_com_motion)
 
-`FilterGen/dredge_lite.py` estimates probe-wide motion by decentralized
-registration -- a small version of DREDge (Windolf et al.,
-https://github.com/evarol/dredge), specialised to being downstream of a
-sorter.
+Probe-wide (common-mode) motion, estimated by localizing every unit and
+pooling. `drift_estimate.pooled_com_motion()` tracks each unit's
+amplitude-weighted centroid depth over time, converts each trajectory to a
+DISPLACEMENT by subtracting that unit's own mean, and takes the median across
+units at every time bin. That median is the probe motion; each unit's
+residual from it is that unit's private motion.
 
-### Why pooling, rather than a better per-unit tracker
+Pooling is the whole point. Real drift is mostly the tissue moving relative
+to the probe, so it is *shared* by every unit -- 160 units each carrying an
+independent noisy estimate of one common quantity. Averaging them is the
+cheapest variance reduction available, and it is why a pooled estimate beats
+any single unit's tracker (`drift_estimate.unit_trajectory`) even though it
+uses exactly the same localizer.
 
-`drift_estimate.unit_trajectory` follows each unit's own amplitude centroid.
-A unit firing at 1.5 Hz puts ~90 spikes in a 60 s bin, and the centroid of a
-90-spike average wanders several microns on noise alone -- against a drift
-signal of ~30 um over a session. Smoothing does not fix that; it trades the
-noise for the lag that makes an abrupt step unfindable.
+**Median, not mean.** On the simulator the two agree (slope 0.998 vs 0.984
+against known truth), but on a real recording the mean is visibly noisier
+(corr 0.873 vs 0.962 against Kilosort 4's own estimate). Real populations
+contain units whose centroid is dominated by a single channel.
 
-Pooling does fix it, because **drift is common-mode**. The tissue slides
-along the shank and takes the whole population with it, so N units are not
-N problems but N noisy votes on one trajectory, worth about sqrt(N).
+`--motion-n-windows 1` is rigid: one trajectory for the whole probe. More
+cuts the depth axis into overlapping windows and pools units within each by
+their own depth, for the nonrigid case. Windows overlap because a motion
+field with discontinuities at window boundaries is not a thing tissue does,
+and because each window still needs enough units to average. On the
+simulator a 4-window nonrigid fit was slightly *worse* than the rigid one
+while over-reporting the span -- each window sees a quarter of the units, and
+that costs more than the depth dependence it recovers. Nonrigid earns its
+keep when motion genuinely differs across the probe by more than the
+per-window noise, which is a thing to measure rather than assume.
 
-"Decentralized" specifically means no reference bin is privileged: every
-*pair* of time bins is cross-correlated to give a displacement D_ij and a
-confidence w_ij, and one trajectory is then solved for that best explains
-all pairs at once. A pair that could not be compared reliably gets a low
-weight instead of corrupting the answer, which is what a
-measure-everything-against-bin-0 scheme cannot do once the probe has moved
-far enough that bin 0 no longer overlaps the present.
+### What this replaced, and why the comparison is recorded
 
-### What being downstream of a sorter buys
+`dredge_lite.py` implemented decentralized registration -- a small version of
+DREDge (Windolf et al., https://github.com/evarol/dredge): bin amplitude into
+a (depth, time) raster, cross-correlate every pair of time columns, and solve
+the resulting graph for one displacement per column. It was measured against
+the centroid estimator on both available sessions and then deleted.
 
-DREDge's AP mode must *localize* each individual spike before it can build
-its raster. We already know which spikes belong to which unit, so a unit's
-spikes can be averaged within a time bin *before* anything is measured. The
-raster here is built from per-unit per-bin mean-waveform amplitude profiles
-instead: the same raster, far better SNR per entry, and no localizer to
-tune. The full per-channel profile is kept rather than collapsed to a
-centroid, because the profile's ~30 um *shape* is what cross-correlation
-registers.
+                          simulator (truth known)      Lav69 (vs KS4 dshift)
+    raster registration   rmse 1.03 um                 corr 0.845  rmse 1.00
+    pooled centroid       rmse 0.10 um, slope 0.998    corr 0.962  rmse 0.85
 
-Omitted relative to real DREDge: the online/streaming solver, robust
-(L1/Huber) reweighting, and its GPU paths. `--min-corr` is the only
-robustness mechanism and it is blunt.
+plus ~11 s of localization against a raster build and an O(n_time^2)
+correlation sweep. Three structural reasons the centroid won, not just three
+better numbers:
 
-### What it cannot do
+- **A centroid is continuous in depth.** The raster path quantized to a depth
+  bin, and on a real probe the channel rows (15 um) landed exactly on the bin
+  grid (5 um), so its raster was a *comb* -- amplitude on every third bin,
+  nothing between. Cross-correlating a comb collapses instead of decaying
+  (+0.99 at zero shift, -0.24 at +-5 um), every displacement came out
+  0, and it returned an identically flat trajectory on the first real
+  recording it saw. This estimator has no grid to fail on.
+- **Sub-pitch motion needs no interpolation trick.** A unit that moves 2 um
+  moves its centroid 2 um.
+- **Each unit's displacement is its own measurement**, so pooling is a plain
+  robust average rather than a graph solve.
 
-It recovers the common-mode trajectory and nothing else. A unit genuinely
-moving relative to its neighbours is not in the raster's shared structure.
-`sim_truth.npz` therefore stores `probe_offset_um` separately from
-`drift_position_um`, so a pooled estimator is scored on the quantity it
-models rather than charged for one it does not.
+That failure is also why every drift test that survives
+(`test_drift_estimate.py`) includes a case whose drift is a multiple of
+neither the channel pitch nor any plausible bin size. The raster method
+passed seven tests and a full simulator validation because the *simulated*
+drift was 15 um -- exactly one channel row -- so the comb realigned with
+itself perfectly.
 
-### Simulating coherent drift
+**Monopolar triangulation was tried in place of the centroid and rejected.**
+Fitting a 1/r decay to recover a point source is the textbook fix for
+centroid bias, and on Lav69 it scored slope 0.585 against the centroid's
+0.578 and corr 0.963 against 0.962 -- for 31 s of solving against 0.1 s.
+Identical accuracy, 300x the cost.
 
-`make_sim_session.py --probe-drift-um 30` gives every unit the same ramp --
-the ~2-channel settling of an ordinary day-long recording. `--probe-jumps`
-adds abrupt probe-wide steps on top (kept separate from the ramp because
-slow settling and steps break different things: a slow tracker follows the
-ramp fine and lags the step badly), and `--probe-nonrigid-gain` makes the
-motion depth-dependent, which is the first-order term of any smooth
-nonrigid field. `--n-drifting` still exists and now means per-unit motion
-*relative to the tissue*, layered on top.
+The raster method's one genuine advantage, now unavailable: it registers the
+population's *summed* profile, so it does not need any single unit to be
+localizable on its own. On a recording dominated by overlapping
+low-amplitude units that could matter. No session here tested it, and it is
+recorded so that a future null result on such data has a suspect.
 
-With no `--probe-drift-um` the generator is bit-for-bit what it was, so
-older sessions remain reproducible.
+### The one open discrepancy
 
-**A geometry note that is easy to get wrong.** A 30 um ramp does not give a
-30 um train/test displacement under a half/half chronological split. The
-train half's mean position and the test half's mean position differ by half
-the total span -- 15 um, one channel. Ask for twice the drift you want to
-test, or compare against a late window rather than the test mean.
-
-### Two bugs the tests caught
-
-`test_dredge_lite.py` runs against synthetic rasters with known
-trajectories, so a failure there is a bug in the algebra rather than a
-statement about data. Both of these produced plausible-looking wrong
-trajectories rather than obvious breakage:
-
-- **The sign of `b` in the normal equations.** `D` is antisymmetric, so both
-  gradient sums collapse to the same `+D_kj` form and the term lands on the
-  opposite side from where it looks like it should; the solve returned
-  `-p`. The uniform-weight closed form `p_k = mean_j D_jk` is asserted
-  directly for exactly this reason.
-- **Correlation normalization under shift.** Normalizing each column once
-  and then zeroing whatever a shift pushes off the probe end leaves the
-  denominator sized for the full column while the numerator has lost rows,
-  penalising large shifts in proportion to their size and shrinking every
-  displacement toward zero. Scoring each shift on its overlapping range
-  only improved every test at once (rigid 30 um ramp 0.76 -> 0.04 um;
-  narrowest nonrigid window 4.36 -> 0.59 um). The bias is invisible on a
-  long probe with small drift and obvious on a narrow nonrigid window.
-
-### RESULT: pooling is 3x more accurate, and the static control explains
-### why the drift modes never helped
-
-1800 s, 160 units, 30 um coherent ramp plus 0.3 nonrigid gain, against a
-matched static arm generated from the same seed (identical spikes, units and
-amplitudes -- only the probe motion differs). Error is rms against the known
-trajectory, in microns:
-
-                              dredge_lite   per-unit tracker
-    drift arm  median              1.05           3.03
-               90th pct            1.41          21.01
-               max                 1.64          56.10
-    static arm median              0.00           2.68
-               90th pct            0.00          22.51
-               max                 0.00          71.34
-
-    estimated motion span: 29.8 um (true 30.0) on the drift arm,
-                            0.0 um (true  0.0) on the static arm
-
-**The static arm is the important column.** On a recording with exactly zero
-drift, per-unit tracking reports up to 71 um of apparent motion, and 36 of
-160 units -- 22% -- exceed the 12 um `tol_um` at which
-`segment_from_trajectory` decides a unit is drifting and cuts it into
-segments.
-
-That is very likely the whole story behind "the drift modes do not help".
-`--mode segmented` was splitting a fifth of the *stationary* population on
-pure measurement noise, starving each of those units' segments of spikes for
-no reason at all, and the harm there cancelled whatever the genuinely
-drifting units gained. The problem was never that drift does not matter. It
-was that the trajectory being segmented on was noise-dominated, so the
-method spent most of its effort on units that were not moving.
-
-`dredge_lite` reports 0.000 um on the static arm -- not "small", identically
-zero, because every pair's correlation peaks at zero shift -- so it has no
-false-positive rate to trade away.
-
-### Rigid or nonrigid?
-
-Use rigid unless the nonrigidity is large. On this session the true
-depth-dependent spread is 8.1 um out of 34.0 um of total motion, and the
-4-window nonrigid fit is slightly *worse* than the rigid one (median 1.12 vs
-1.05 um) while over-reporting the motion span (51.9 vs 34.0 um true): each
-window sees a quarter of the units, and that costs more than the depth
-dependence it recovers. Nonrigid earns its keep when motion actually differs
-across the probe by more than the per-window noise, which is a thing to
-measure, not assume.
+On Lav69 both localizers recover only ~58% of the amplitude Kilosort 4's
+`ops['dshift']` reports, while tracking its *shape* at corr 0.96. Since
+triangulation reproduces the compression exactly, it is not a centroid
+artifact; and since the same estimator recovers simulator truth at slope
+0.998 (per-unit median 1.015), it is not a general bias either. `dshift`'s
+scale is the likelier explanation, but Lav69 has no ground truth and that
+stays an inference. One caveat against us: the simulator's drift is exactly
+the model a centroid assumes -- rigid translation of a Gaussian footprint,
+no waveform change with depth -- so slope 1.0 there is necessary but not
+sufficient.
 
 ### Running it
 
-`python dredge_lite.py --ks-dir ... --bin-path ... --channel-map-json ...
---truth sim_truth.npz` scores this estimator and
-`drift_estimate.unit_trajectory` on the same recording, against both truths.
-`--n-windows 1` is rigid; more is nonrigid.
+`pooled_com_motion` is called by `calibrate_drift_aware.py` in
+`--split-mode chronological` for every mode except `global`; `--motion-bin-s`
+sets the time-bin width and `--motion-n-windows` / `--motion-window-overlap`
+control the rigid/nonrigid choice. `test_drift_estimate.py` runs it against
+synthetic recordings with known drift, including the sub-pitch case.
 
 ## Building
 

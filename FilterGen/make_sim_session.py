@@ -384,7 +384,7 @@ def probe_offset_um(u, t_s):
 
     That distinction is not cosmetic, it decides which estimators can work
     at all. An estimator that pools across units -- the decentralized
-    registration family, of which `dredge_lite.py` here is a small member --
+    registration family, and `drift_estimate.pooled_com_motion` here --
     exists precisely because the motion is common-mode: 160 units each
     giving a noisy vote on one shared trajectory beats any of them alone by
     ~sqrt(160). Give every unit an *independent* direction instead and that
@@ -916,7 +916,7 @@ def write_truth(path, units, spike_times, spike_clusters, syllables, args, fs,
     peak_gidx = np.zeros((len(units), t_grid.size), dtype=np.int32)
 
     # Stored separately from the total so a pooled estimator can be scored
-    # against the thing it actually estimates. dredge_lite.py recovers the
+    # against the thing it actually estimates. A pooled estimator recovers the
     # common-mode trajectory and *cannot* recover a unit's private residual;
     # scoring it against drift_position_um alone would charge it for an error
     # no method of its class can avoid.

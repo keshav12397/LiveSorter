@@ -40,6 +40,8 @@ apart. Anything reasoning about drift as a distance must use `yc` or the
 index within the depth-ordered group.
 """
 
+import warnings
+
 import numpy as np
 
 import generate_filter as gf
@@ -140,6 +142,24 @@ def unit_trajectory(data, spike_times, chan_y, template_length, template_offset,
 
 
 
+def motion_at(t_query_s, y_query_um, t_center_s, motion, win_centers_um):
+    """Evaluate an `estimate_motion` result at arbitrary (time, depth).
+
+    Linear in both axes, and constant (edge-clamped) outside the estimated
+    range: extrapolating a motion field past the units that constrained it
+    invents drift that nothing measured.
+    """
+    motion = np.atleast_2d(motion)
+    t_query_s = np.asarray(t_query_s, dtype=np.float64)
+    if motion.shape[0] == 1:
+        return np.interp(t_query_s, t_center_s, motion[0])
+    per_win = np.stack([np.interp(t_query_s, t_center_s, motion[w])
+                        for w in range(motion.shape[0])], axis=0)
+    y = np.clip(float(y_query_um), float(np.min(win_centers_um)),
+                float(np.max(win_centers_um)))
+    return np.array([np.interp(y, win_centers_um, per_win[:, k])
+                     for k in range(t_query_s.size)])
+
 def pooled_com_motion(data, spike_times, spike_clusters, chan_y,
                       template_length, template_offset, fs, unit_ids,
                       bin_s=20.0, spikes_per_bin=150, n_top=8,
@@ -148,34 +168,39 @@ def pooled_com_motion(data, spike_times, spike_clusters, chan_y,
     """Common-mode probe motion by pooling per-unit centroid trajectories.
 
     Returns `(t_center_s, motion, win_centers_um)` with `motion` shaped
-    (n_windows, n_time) -- the same contract `dredge_lite.estimate_motion`
-    plus `window_centers_um` return, so the two are interchangeable at the
-    call site.
+    (n_windows, n_time), rigid when n_windows == 1. Evaluate it at a
+    particular depth with `motion_at`.
 
-    Why this exists alongside dredge_lite
-    -------------------------------------
-    dredge_lite registers an amplitude RASTER by cross-correlation. This
-    tracks each unit's amplitude-weighted centroid depth (the same
-    `_position_from_waveform` used everywhere else here), converts each to a
-    DISPLACEMENT by subtracting that unit's own mean, and takes the median
-    across units at each time. Measured on the same sessions:
+    This is the only motion estimator here. A decentralized-registration
+    implementation (`dredge_lite.py`, DREDge-style: build an amplitude
+    raster over (depth, time), cross-correlate every pair of time columns,
+    solve the resulting graph) was written, measured against this one, and
+    then deleted. Keeping the comparison because it is the reason this
+    design was chosen:
 
                               simulator (truth known)      Lav69 (vs KS4 dshift)
-        dredge_lite raster    rmse 1.03 um                 corr 0.845  rmse 1.00
+        raster registration   rmse 1.03 um                 corr 0.845  rmse 1.00
         pooled centroid       rmse 0.10 um, slope 0.998    corr 0.962  rmse 0.85
 
     plus ~11 s of localisation against a raster build and an O(n_time^2)
-    correlation sweep. Three structural reasons it wins, not just three
+    correlation sweep. Three structural reasons it won, not just three
     better numbers:
 
-      - A centroid is CONTINUOUS in depth. The raster path quantises to a
-        depth bin, which is what let the comb bug (see dredge_lite's
-        build_raster) return identically zero on a real recording. This
-        estimator cannot fail that way; there is no grid to align to.
+      - A centroid is CONTINUOUS in depth. The raster path quantised to a
+        depth bin, and its channels landed exactly on bin edges (15 um rows,
+        5 um bins), so its raster was a comb: cross-correlation collapsed
+        rather than decaying, every displacement came out 0, and it returned
+        an identically flat trajectory on the first real recording it saw.
+        This estimator cannot fail that way; there is no grid to align to.
       - Sub-pitch motion needs no interpolation trick. A unit that moves
         2 um moves its centroid 2 um.
       - Each unit's displacement is its own measurement, so pooling is a
         plain robust average rather than a graph solve.
+
+    The raster method's one genuine advantage, now unavailable: it registers
+    the population's summed profile and so does not need any single unit to
+    be localisable on its own. On a recording dominated by overlapping
+    low-amplitude units that could matter. No session here tested it.
 
     Monopolar triangulation was tried in place of the centroid and is not
     worth it: on Lav69 it scored slope 0.585 against the centroid's 0.578
@@ -193,8 +218,8 @@ def pooled_com_motion(data, spike_times, spike_clusters, chan_y,
 
     With `n_windows > 1` the depth axis is cut into overlapping windows and
     units are pooled within each by their own mean depth -- the nonrigid
-    case. Windows overlap for the reason dredge_lite states: a motion field
-    with discontinuities is not a thing tissue does, and each window needs
+    case. Windows overlap on purpose: a motion field with discontinuities
+    at window boundaries is not a thing tissue does, and each window needs
     enough units to average. A window holding fewer than `min_units` falls
     back to the all-unit estimate rather than reporting its own noise.
     """
@@ -233,7 +258,12 @@ def pooled_com_motion(data, spike_times, spike_clusters, chan_y,
     def _pool(mask):
         if mask.sum() < min_units:
             mask = np.ones(Y.shape[0], dtype=bool)
-        with np.errstate(invalid="ignore"):
+        # An all-NaN column is expected, not exceptional: it is a time bin no
+        # unit in this window fired in, and the fill below is the handling.
+        # np.errstate does not cover it -- nanmedian raises a RuntimeWarning
+        # through the warnings machinery, not the floating-point one.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
             m = np.nanmedian(Y[mask], axis=0)
         # A time bin nobody covered is filled from its neighbours rather than
         # left NaN: downstream consumers evaluate the trajectory at arbitrary
