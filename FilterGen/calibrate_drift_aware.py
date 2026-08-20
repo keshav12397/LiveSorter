@@ -563,6 +563,32 @@ def _fit_one_unit_chrono(target_id, spike_count, mode):
             lo, hi = 0, split_t
             drift_span = float("nan")
             segs_train = [(0, split_t)]
+        elif mode == "recency":
+            # THE CONTROL THAT DECIDES WHAT SEGMENTATION IS WORTH.
+            #
+            # 'segmented' deploys segs_train[-1] -- the LAST train segment.
+            # That segment is not only the one nearest the unit's estimated
+            # end-of-training position, it is also simply the most RECENT
+            # training data, and recency alone helps: the probe's position at
+            # the train/test boundary is closer to the test half than the
+            # start of training is, whatever found the boundary.
+            #
+            # So 'recency' cuts the train half into --recency-segments equal
+            # slices of TIME and deploys the last one, using no trajectory at
+            # all. Any advantage 'segmented' has over THIS is what estimating
+            # drift actually bought. If the two match, the drift estimate is
+            # decoration and a fixed "fit on the last N seconds" rule is the
+            # honest recommendation.
+            #
+            # Set --recency-segments to the segment count 'segmented'
+            # typically produces on the same data, or the comparison is
+            # between different amounts of training data rather than between
+            # two ways of choosing the same amount.
+            k = max(int(a["recency_segments"]), 1)
+            edges = [int(round(i * split_t / k)) for i in range(k + 1)]
+            segs_train = [(edges[i], edges[i + 1]) for i in range(k)]
+            lo, hi = segs_train[-1]
+            drift_span = float("nan")
         else:
             t_c_pooled, motion_pooled, win_centers = (
                 a["t_c_pooled"], a["motion_pooled"], a["win_centers"])
@@ -736,7 +762,15 @@ def main():
     ap.add_argument("--bin-path", required=True)
     ap.add_argument("--meta-path")
     ap.add_argument("--channel-map-json")
-    ap.add_argument("--mode", choices=["global", "segmented", "registered", "both", "all"],
+    ap.add_argument("--recency-segments", type=int, default=4,
+                    help="For --mode recency: how many equal-TIME slices to "
+                         "cut the train half into before deploying the last "
+                         "one. Match this to the segment count --mode "
+                         "segmented actually produces, or the two are not "
+                         "comparable. See the 'recency' branch for why this "
+                         "control exists.")
+    ap.add_argument("--mode", choices=["global", "segmented", "registered",
+                                       "recency", "both", "all"],
                     default="both",
                     help="'global' is the baseline fit under this script's "
                          "interleaved protocol (one filter per unit); "
@@ -878,7 +912,7 @@ def main():
     if args.mode == "both":
         modes = ["global", "segmented"]
     elif args.mode == "all":
-        modes = ["global", "segmented", "registered"]
+        modes = ["global", "segmented", "registered", "recency"]
     else:
         modes = [args.mode]
 
@@ -915,6 +949,7 @@ def main():
                      fs=fs, seed=args.seed, cell_samples=cell_samples,
                      train_samples=train_samples, train_frac=args.train_frac,
                      tol_um=args.tol_um, spikes_per_bin=args.spikes_per_bin,
+                     recency_segments=args.recency_segments,
                      min_spikes_per_segment=args.min_spikes_per_segment,
                      max_segments=args.max_segments, decay_um=args.decay_um,
                      split_t=split_t, t_c_pooled=t_c_pooled,
