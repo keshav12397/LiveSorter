@@ -72,9 +72,38 @@ they are filled with cheaper noise to keep generation time reasonable. That
 is a deliberate shortcut, stated here so nobody later reads structure into
 the out-of-group channels that was never put there.
 
+USING THIS DATASET: filter the ground truth by amplitude first
+-------------------------------------------------------------
+Real Kilosort ground truth is survivorship-filtered. A sorter only emits
+units it could actually isolate, so a real session's ground truth contains
+no undetectable units at all. This generator draws amplitude and rate
+independently, so ~40% of its units are below any sorter's detection floor
+and would never have appeared in a real ground-truth file.
+
+Including them makes absolute metrics look far worse than a real session,
+for a reason that has nothing to do with the detector. Measured on a 30 min
+/ 160 unit session against calibrate_all_units.py, versus this project's
+real 157-unit recording:
+
+    population            n     median f1   median precision   f1>0.5
+    all units            160      0.109        0.059            28%
+    amplitude >= 20       94      0.409        0.331            44%
+    REAL recording       157      0.382        0.351            43%
+
+So: **restrict to sim_truth.npz's `amplitude` >= 20 before comparing
+anything to a real session.** At that cut the synthetic population
+reproduces the real one closely. Below it, f1 is dominated by units that a
+real pipeline would never have been asked about -- f1 tracks amplitude at
+r = 0.61 (versus r = 0.30 for rate), and the amp < 20 band has median f1
+0.015.
+
+Within-dataset comparisons (drifting versus static, before versus after a
+method change) are unaffected by this and can use whatever cut is useful,
+as long as the same cut is used on both sides.
+
 Example
 -------
-    python make_sim_session.py \\
+    python make_sim_session.py \
         --out-dir D:/sim_session \\
         --channel-map-json D:/test_newsorter/rawData/shank1only.json \\
         --duration-s 1800 \\
