@@ -8,6 +8,23 @@
 # D:/sim_check/filters (empty at verification time) -- same generator,
 # pre-drift-fix. Good enough to exercise the wire format and the viewer;
 # not a recall/precision claim.
+#
+# Run live once SpikeGLX came back up (it went down mid-session earlier --
+# see the previous commit). Two 30 s runs, both against the real
+# ImecFetchThreadGPU/sglx_fetch path this time, not OfflineReplay:
+#
+#   run 1 (no viewer): span 900175 samples (30.0058 s), processed 900175,
+#     dropped 0 in 0 gaps, fetch errors 0, max backlog 62 samples (2.07 ms).
+#   run 2 (SpikeViewer.exe --live 127.0.0.1:4143 connected throughout):
+#     span 900340, processed 900340, dropped 0, fetch errors 0, max backlog
+#     306 samples (10.2 ms) -- higher with a viewer attached but nowhere near
+#     the ~8 s ring, and still zero drops. Viewer socket: 98011 records
+#     published, 0 dropped.
+#
+# 215719 detections in run 2's 30 s (~7.2k/s combined across 160 units) hit
+# the same DecisionThread throughput ceiling as the offline-replay findings
+# (spike_count capped at 0-1 despite spikeCountThreshold=3) -- confirms that
+# finding is real on the live path too, not an offline-tool artifact.
 sglxHost=localhost
 sglxPort=4142
 filterDir=D:/sim_session/filters_baseline
