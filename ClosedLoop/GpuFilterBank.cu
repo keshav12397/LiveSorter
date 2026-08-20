@@ -133,6 +133,28 @@ GpuFilterBank GpuFilterBank::fromHostArrays( const std::vector<int> &unitIds,
 }
 
 
+void GpuFilterBank::updateFilters( int unitIndex, const std::vector<int32_t> &channels,
+                                    const std::vector<float> &filter, float threshold )
+{
+    if( unitIndex < 0 || unitIndex >= nUnits )
+        throw std::runtime_error( "GpuFilterBank::updateFilters: unitIndex out of range" );
+    if( channels.size() != static_cast<size_t>( nChannelsPerUnit ) ||
+        filter.size() != static_cast<size_t>( templateLength ) * static_cast<size_t>( nChannelsPerUnit ) )
+        throw std::runtime_error( "GpuFilterBank::updateFilters: array size mismatch for this bank's "
+                                   "nChannelsPerUnit/templateLength" );
+
+    size_t chanOffset  = static_cast<size_t>( unitIndex ) * nChannelsPerUnit;
+    size_t filtOffset  = static_cast<size_t>( unitIndex ) * templateLength * nChannelsPerUnit;
+
+    CUDA_CHECK( cudaMemcpy( d_channels + chanOffset, channels.data(),
+                             channels.size() * sizeof(int32_t), cudaMemcpyHostToDevice ) );
+    CUDA_CHECK( cudaMemcpy( d_filters + filtOffset, filter.data(),
+                             filter.size() * sizeof(float), cudaMemcpyHostToDevice ) );
+    CUDA_CHECK( cudaMemcpy( d_thresholds + unitIndex, &threshold,
+                             sizeof(float), cudaMemcpyHostToDevice ) );
+}
+
+
 void GpuFilterBank::release()
 {
     if( d_channels )   { cudaFree( d_channels );   d_channels   = nullptr; }

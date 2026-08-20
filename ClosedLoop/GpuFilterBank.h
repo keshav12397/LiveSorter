@@ -67,6 +67,20 @@ struct GpuFilterBank {
                                           const std::vector<float> &thresholds,
                                           int nChannelsPerUnit, int templateLength );
 
+    // Overwrites ONE unit's channels/filter/threshold in place, for a drift
+    // schedule swap event (see DriftSchedule.h). `channels` must already be
+    // translated to indices within the CAR-group buffer, same convention as
+    // the rest of d_channels after ImecFetchThreadGPU::fetchLoop()'s startup
+    // translation -- this function does no translation itself, matching
+    // fromHostArrays()'s existing "caller's responsibility" convention.
+    // unitIndex is an index into this bank's own arrays (0..nUnits-1), not a
+    // Kilosort cluster id -- DriftSchedule::Event::unitIndex is already in
+    // that form. Three small cudaMemcpys, no allocation: nUnits/
+    // nChannelsPerUnit/templateLength are fixed at load() time and a swap
+    // event's arrays are exactly one unit's slice of the existing layout.
+    void updateFilters( int unitIndex, const std::vector<int32_t> &channels,
+                         const std::vector<float> &filter, float threshold );
+
     // cudaFree everything. Safe to call more than once (idempotent) --
     // matters because both an explicit release() and the destructor may
     // run.
