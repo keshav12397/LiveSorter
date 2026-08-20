@@ -16,10 +16,19 @@ unit at no single moment -- and the damage is not a graceful loss. See
 a smeared target template overlaps a neighbour's template much more than the
 true instantaneous one does, LCMV nulls the neighbour exactly, the null cuts
 into the target, and the solve compensates by growing the weights until the
-filter's own noise floor swamps its unity-gain response. Measured on
-`D:/sim_validate`, the two worst units in the whole session were both
-`drift_kind='jump'` and both failed this way (f1 0.020 and 0.032, precision
-under 2%), while every static unit of comparable amplitude was fine.
+filter's own noise floor swamps its unity-gain response.
+
+An earlier version of this paragraph cited numbers from `D:/sim_validate`,
+which turned out to have generator defects (unit waveforms cross-correlating
+at 0.978 median, spatial footprints ~2.2x too wide) that made the whole
+dataset's precision meaningless. Re-measured on the fixed generator
+(`D:/sim_check`, calibrate_all_units.py's own split-half protocol): banding
+by train-spike count to control for the confound of sparse units scoring
+low regardless of drift, drifting units trail static units of the SAME
+band everywhere it's measurable -- e.g. band [1000,3000) train spikes,
+median f1 0.077 (drifting, n=7) vs 0.627 (static, n=11); band [3000,10000),
+0.260 (n=6) vs 0.473 (n=11). The effect is real; the specific numbers above
+are what this docstring will keep, revised, if the generator changes again.
 
 No new math
 -----------
@@ -88,8 +97,8 @@ Output (in --out-dir, per mode)
 Example
 -------
     python calibrate_drift_aware.py \\
-        --ks-dir D:/sim_validate/sim_ks \\
-        --bin-path D:/sim_validate/sim_g0_t0.imec0.ap.bin \\
+        --ks-dir D:/sim_check/sim_ks \\
+        --bin-path D:/sim_check/sim_g0_t0.imec0.ap.bin \\
         --channel-map-json D:/test_newsorter/rawData/shank1only.json \\
         --auto-interferers 5 --min-spikes 60 --max-units 12 --workers 4 \\
         --mode both --out-dir D:/drift_work/validate
@@ -439,12 +448,30 @@ def main():
     ap.add_argument("--min-spikes", type=int, default=200)
     ap.add_argument("--max-units", type=int, default=0)
     ap.add_argument("--workers", type=int, default=0)
-    ap.add_argument("--tol-um", type=float, default=12.0,
+    ap.add_argument("--tol-um", type=float, default=18.0,
                     help="Depth span one filter is asked to cover. A unit "
                          "whose estimated trajectory spans less than this "
-                         "gets exactly one segment, i.e. the baseline fit.")
-    ap.add_argument("--min-spikes-per-segment", type=int, default=250)
-    ap.add_argument("--max-segments", type=int, default=8)
+                         "gets exactly one segment, i.e. the baseline fit. "
+                         "Raised from an initial 12.0 to 18.0 (just above "
+                         "one 15um probe row) after measuring on D:/sim_check "
+                         "that 12.0 let per-unit centroid noise alone -- not "
+                         "real drift -- push several genuinely static units "
+                         "(thousands of spikes each) past the 8-segment cap; "
+                         "18.0 removed those false positives with no loss on "
+                         "the true-drift units (mean f1 delta +0.005 -> "
+                         "+0.005 pooled, +0.014 -> +0.018 on drifting units "
+                         "only, fewer worst-case regressions).")
+    ap.add_argument("--min-spikes-per-segment", type=int, default=400,
+                    help="Raised from an initial 250 alongside --tol-um -- "
+                         "see that flag's help for the measurement.")
+    ap.add_argument("--max-segments", type=int, default=4,
+                    help="Lowered from an initial 8: on D:/sim_check every "
+                         "genuinely drifting unit that benefited did so with "
+                         "<=4 segments; the units still hitting the old cap "
+                         "of 8 were exclusively the --tol-um false positives "
+                         "above, which this cap now catches earlier too "
+                         "(fewer wasted fit/threshold-sweep passes for zero "
+                         "measured benefit).")
     ap.add_argument("--spikes-per-bin", type=int, default=150,
                     help="Spikes per trajectory-estimation bin. See "
                          "drift_estimate.unit_trajectory.")
