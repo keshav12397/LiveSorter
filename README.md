@@ -400,7 +400,61 @@ It does not reimplement any fit or sweep math -- it calls
 `threshold_sweep_real.fit_lcmv` and `sweep_thresholds` like every other
 driver here, for the reason those modules state about themselves.
 
-### SCOPE WARNING on the result below
+### RESULT: coherent drift costs 0.22 f1 at one channel of displacement
+
+Measured on a matched pair of 1800 s / 160-unit sessions generated from the
+same seed -- identical units, spikes and amplitudes, differing ONLY in
+probe-wide motion (30 um ramp, 0.3 nonrigid gain) -- and calibrated with a
+CHRONOLOGICAL half/half split, which is the calibrate-once-then-deploy
+geometry that actually motivates drift-aware filters.
+
+Restricted to the 61 units detectable at all in the static arm (the
+population is bimodal; averaging in units that fail in BOTH arms only
+dilutes the effect):
+
+                    static    drift     delta
+        recall      0.7929    0.5955   -0.1974
+        precision   0.5678    0.3588   -0.2090
+        f1          0.6207    0.3963   -0.2244
+
+85% of those units get worse. Note that train->test displacement here is
+only ~15 um -- ONE channel -- because a half/half split on a linear ramp
+separates the two halves' mean positions by half the total span, not the
+full 30 um.
+
+**Recall and precision fall together, by almost exactly the same amount.**
+That matters for what a fix has to do: a purely mis-set threshold trades one
+against the other, so this is not a thresholding problem. The filter itself
+is mismatched -- the template is an average over positions the unit no
+longer occupies, and `select_channels` picked for that average.
+
+There is no dose-response visible within this session (correlation between
+displacement and f1 change is -0.04) simply because displacement barely
+varies across units: the nonrigid gain spreads it only over 13-17 um. This
+session tests one dose, and tests it well.
+
+### Why the earlier measurement said the opposite
+
+The subsection below reports a drift penalty of 0.022 and concludes the
+drift modes do not help. Both of its premises were wrong, and the difference
+between 0.022 and 0.224 is the whole story:
+
+1. **The drift was independent per unit.** Each drifting unit got its own
+   direction, magnitude, shape and timing, so units 30 um apart moved
+   opposite ways. Real drift is common-mode. Beyond making pooled estimators
+   inapplicable, this also let a filter's interferers stay put while its
+   target moved, which is a much gentler problem than the whole
+   neighbourhood sliding together.
+2. **The train/test split was interleaved.** `calibrate_drift_aware.py`
+   trains on the first part of every cell, so the control's training data
+   spans the entire trajectory. That measures interpolation. Nothing there
+   ever had to extrapolate to a position it had not seen.
+
+The detection-lag finding below is unaffected by either point -- it is a bug
+in how detections were matched to ground truth, not a claim about drift --
+and it stands.
+
+### The earlier (superseded) measurement
 
 The measurement in this subsection was made on a session whose drift model
 was wrong in a way that limits what the numbers can mean, and it is being
@@ -454,8 +508,13 @@ so the lag varies -- and a varying lag crosses the +/-15 sample matching
 window far more often than a fixed one. The bug therefore punished drifting
 units specifically, which looks exactly like a drift penalty and is not one.
 
-**So: use the detection-lag fix, and do not deploy the drift modes on data
-like this** -- where "like this" now carries the scope warning above. The remaining 0.022 penalty is close to the noise between
+**So: use the detection-lag fix.** The verdict on the drift modes
+themselves is now OPEN, not negative: they were only ever measured against
+independent per-unit drift under an interpolation split, and on coherent
+drift under a chronological split there is a 0.22 f1 penalty for them to go
+after. They should be re-measured on the paired sessions above, with
+`dredge_lite`'s pooled trajectory rather than the per-unit one that reports
+up to 71 um of motion on a session with none. The remaining 0.022 penalty is close to the noise between
 subgroups. The segmented/registered code is kept because a negative result
 is only meaningful alongside the code that produced it, and because faster
 drift or sparser units than this session contains might still favour it --
