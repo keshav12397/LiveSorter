@@ -6,6 +6,7 @@
 #include <map>
 
 #include "LiveWire.h"
+#include "DriftTracker.h"
 
 // Everything SpikeViewer knows about a session, and the only place events are
 // interpreted. The UI reads from here and computes nothing itself.
@@ -61,6 +62,21 @@ public:
     void reset();
     void setUnitIds( const std::vector<int> &unitIds );
     void setSampleRates( double imecHz, double niHz );
+
+    // Version-2 channel geometry (LiveWireClient::unitChannelGeom(), same
+    // order as unitIds). Configures the live drift tracker; a no-op call
+    // (empty geometry, e.g. a v2 stream that never called
+    // EventPublisher::setChannelGeometry()) just means driftTrace() stays
+    // empty -- nothing else in the viewer depends on this.
+    void setChannelGeometry( const std::vector<std::vector<livewire::ChannelGeom> > &unitChannelGeom,
+                              double driftBinS = 20.0 );
+
+    const DriftTracker::Trace &driftTrace() const { return driftTrace_; }
+    // Recomputes driftTrace() from everything ingested so far. Cheap
+    // enough for a per-frame call (see DriftTracker::trace()); a caller
+    // that draws every frame does not need to call this more than once
+    // per frame either way.
+    void refreshDriftTrace() { driftTrace_ = driftTracker_.trace(); }
 
     // Live ingest. Records are applied in arrival order; the model tolerates
     // gaps (the publisher drops oldest under overload) without corrupting.
@@ -161,6 +177,9 @@ private:
 
     bool      lineHigh_;
     long long nLineRaises_;
+
+    DriftTracker        driftTracker_;
+    DriftTracker::Trace driftTrace_;
 };
 
 #endif // VIEWER_SESSIONMODEL_H

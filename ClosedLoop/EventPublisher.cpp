@@ -4,6 +4,7 @@
 #include <sstream>
 #include <chrono>
 #include <cstring>
+#include <algorithm>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -62,6 +63,34 @@ EventPublisher::EventPublisher( int port, const std::vector<int> &unitIds,
     header_.imecSampleRateHz = imecSampleRateHz;
     header_.niSampleRateHz   = niSampleRateHz;
     header_.syllableSourceIsImecSy = syllableSourceIsImecSy ? 1 : 0;
+    header_.templateLength   = 0;
+
+    // Valid empty v2 preamble until/unless setChannelGeometry() is called.
+    nChannels_.assign( unitIds_.size(), 0 );
+}
+
+
+void EventPublisher::setChannelGeometry(
+    const std::vector<std::vector<livewire::ChannelGeom> > &unitChannelGeom,
+    int templateLength )
+{
+    nChannels_.assign( unitIds_.size(), 0 );
+    channelGeom_.clear();
+
+    // Defensive rather than fatal: a mismatched geometry vector (caller
+    // bug) degrades to "no geometry for the units past the mismatch"
+    // instead of crashing the whole recording session, matching this
+    // file's existing stance that the viewer socket must never be able to
+    // take the run down.
+    size_t n = std::min( unitChannelGeom.size(), unitIds_.size() );
+    for( size_t i = 0; i < n; ++i ) {
+        nChannels_[i] = static_cast<int32_t>( unitChannelGeom[i].size() );
+        channelGeom_.insert( channelGeom_.end(),
+                              unitChannelGeom[i].begin(), unitChannelGeom[i].end() );
+    }
+
+    header_.templateLength = static_cast<uint8_t>(
+        std::min( templateLength, 255 ) );
 }
 
 
@@ -225,6 +254,20 @@ void EventPublisher::serverLoop()
                 std::vector<int32_t> ids( unitIds_.begin(), unitIds_.end() );
                 int bytes = static_cast<int>( ids.size() * sizeof(int32_t) );
                 headerOk = ( send( c, reinterpret_cast<const char*>( &ids[0] ), bytes, 0 ) == bytes );
+            }
+            // Version-2 channel-geometry preamble: nChannels[nUnits] then
+            // the flat unit-major ChannelGeom array (see LiveWire.h). Sent
+            // unconditionally at v2 -- even an EventPublisher that never
+            // called setChannelGeometry() has a valid all-zero nChannels_
+            // from the constructor, so this is always a well-formed
+            // preamble for a v2-speaking client to read.
+            if( headerOk && !nChannels_.empty() ) {
+                int bytes = static_cast<int>( nChannels_.size() * sizeof(int32_t) );
+                headerOk = ( send( c, reinterpret_cast<const char*>( &nChannels_[0] ), bytes, 0 ) == bytes );
+            }
+            if( headerOk && !channelGeom_.empty() ) {
+                int bytes = static_cast<int>( channelGeom_.size() * sizeof(livewire::ChannelGeom) );
+                headerOk = ( send( c, reinterpret_cast<const char*>( &channelGeom_[0] ), bytes, 0 ) == bytes );
             }
             if( !headerOk ) {
                 closesocket( c );

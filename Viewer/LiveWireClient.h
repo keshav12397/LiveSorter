@@ -35,6 +35,15 @@ public:
     const livewire::SessionHeader &header() const { return header_; }
     const std::vector<int> &unitIds() const { return unitIds_; }
 
+    // Version-2 channel-geometry preamble (see LiveWire.h), one entry per
+    // unit id above, in the same order, each unit's own channels in the
+    // order a kWireAmpChannel record's `c` field indexes into. Always
+    // sized nUnits (possibly with empty per-unit vectors) once connect()
+    // has succeeded -- version is already gated to exactly kProtocolVersion
+    // by connect() itself, so there is no separate "is this v2" check here.
+    const std::vector<std::vector<livewire::ChannelGeom> > &unitChannelGeom() const
+    { return unitChannelGeom_; }
+
     // Appends everything currently readable to `out`. Returns false if the
     // peer closed or errored, in which case connected() is now false and
     // whatever was already read stays in `out`.
@@ -51,6 +60,7 @@ private:
 
     livewire::SessionHeader header_;
     std::vector<int>        unitIds_;
+    std::vector<std::vector<livewire::ChannelGeom> > unitChannelGeom_;
 
     // Bytes of a record that arrived without the rest of it.
     std::vector<char> remainder_;

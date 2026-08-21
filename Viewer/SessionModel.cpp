@@ -51,6 +51,9 @@ void SessionModel::reset()
 
     lineHigh_    = false;
     nLineRaises_ = 0;
+
+    driftTracker_.reset();
+    driftTrace_ = DriftTracker::Trace();
 }
 
 
@@ -66,9 +69,20 @@ void SessionModel::setUnitIds( const std::vector<int> &unitIds )
 
 void SessionModel::setSampleRates( double imecHz, double niHz )
 {
-    if( imecHz > 0 )
+    if( imecHz > 0 ) {
         imecRate_ = imecHz;
+        driftTracker_.setSampleRate( imecRate_ );
+    }
     niRate_ = niHz;
+}
+
+
+void SessionModel::setChannelGeometry( const std::vector<std::vector<livewire::ChannelGeom> > &unitChannelGeom,
+                                        double driftBinS )
+{
+    driftTracker_.configure( unitIds_, unitChannelGeom, driftBinS );
+    driftTracker_.setSampleRate( imecRate_ );
+    driftTrace_ = DriftTracker::Trace();
 }
 
 
@@ -187,6 +201,13 @@ void SessionModel::applyRecord( const livewire::WireRecord &rec )
         lineHigh_ = ( rec.a != 0 );
         if( lineHigh_ )
             ++nLineRaises_;
+        break;
+
+    case livewire::kWireAmpChannel:
+        // Slow-path input to the live drift tracker only -- does not touch
+        // perUnit_/firstSample_/latestSample_, so it cannot perturb the
+        // raster or PSTH machinery above. See DriftTracker.h.
+        driftTracker_.onAmpChannel( rec.a, rec.sampleIndex, rec.c, rec.b );
         break;
 
     default:

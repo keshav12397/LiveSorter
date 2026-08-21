@@ -653,6 +653,45 @@ void drawTriggerAligned()
     ImGui::End();
 }
 
+// ---------------------------------------------------------------------------
+// Live drift tracker (DriftTracker.h / DriftPool.h) -- pooled median probe
+// motion, updated from kWireAmpChannel records. Recomputed once per frame
+// (SessionModel::refreshDriftTrace()) rather than on every record: the
+// pooling math is cheap at this bin count, and this is explicitly the
+// slow, >500 ms-is-fine half of the pipeline (see LiveWire.h / AmplitudeExtractor.h).
+// ---------------------------------------------------------------------------
+void drawDrift()
+{
+    ImGui::Begin( "Drift" );
+
+    const DriftTracker::Trace &tr = g_st.model.driftTrace();
+
+    if( tr.tCenterS.empty() ) {
+        ImGui::TextColored( ImVec4( 0.7f, 0.7f, 0.7f, 1 ),
+            "No drift estimate yet -- needs >=4 time bins of amplitude data "
+            "for at least one unit (bins default to 20 s each)." );
+        ImGui::End();
+        return;
+    }
+
+    ImGui::Text( "%d unit(s) pooled, %d bin(s)", tr.nUnitsPooled, (int)tr.tCenterS.size() );
+
+    if( ImPlot::BeginPlot( "pooled median motion", ImVec2( -1, -1 ) ) ) {
+        ImPlot::SetupAxes( "stream time (s)", "displacement (um)" );
+
+        double zero[1] = { 0.0 };
+        ImPlot::SetNextLineStyle( ImVec4( 1, 1, 1, 0.35f ), 1.0f );
+        ImPlot::PlotInfLines( "##zero", zero, 1, ImPlotInfLinesFlags_Horizontal );
+
+        ImPlot::SetNextLineStyle( ImVec4( 0.95f, 0.65f, 0.25f, 1.0f ), 2.0f );
+        ImPlot::PlotLine( "pooled motion", &tr.tCenterS[0], &tr.motionUm[0], (int)tr.tCenterS.size() );
+
+        ImPlot::EndPlot();
+    }
+
+    ImGui::End();
+}
+
 // Connect / open, factored out of the buttons so the command line can do
 // exactly what a click does rather than a parallel version of it.
 bool connectLive()
@@ -665,6 +704,7 @@ bool connectLive()
     g_st.model.setUnitIds( g_st.client.unitIds() );
     g_st.model.setSampleRates( g_st.client.header().imecSampleRateHz,
                                 g_st.client.header().niSampleRateHz );
+    g_st.model.setChannelGeometry( g_st.client.unitChannelGeom() );
     g_st.model.setHistorySeconds( g_st.historyS );
     g_st.live = true;
     syncUnitVisibility();
@@ -843,6 +883,7 @@ int main( int argc, char **argv )
             if( !g_pollBuf.empty() ) {
                 syncUnitVisibility();
                 g_st.model.trimHistory();
+                g_st.model.refreshDriftTrace();
             }
             if( !alive ) {
                 g_st.live = false;
@@ -882,6 +923,12 @@ int main( int argc, char **argv )
             ImGui::SetNextWindowSize( ImVec2( 1130, 450 ), ImGuiCond_FirstUseEver );
         }
         drawTriggerAligned();
+
+        if( firstFrame ) {
+            ImGui::SetNextWindowPos( ImVec2( 1590, 10 ), ImGuiCond_FirstUseEver );
+            ImGui::SetNextWindowSize( ImVec2( 500, 460 ), ImGuiCond_FirstUseEver );
+        }
+        drawDrift();
 
         firstFrame = false;
 

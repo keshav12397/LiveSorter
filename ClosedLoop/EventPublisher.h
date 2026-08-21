@@ -45,6 +45,18 @@ public:
                      size_t ringCapacity = 65536 );
     ~EventPublisher();
 
+    // Sets the version-2 channel-geometry preamble (see LiveWire.h): one
+    // entry per unit in `unitChannelGeom`, in the same order as the
+    // `unitIds` passed to the constructor, each entry the channel positions
+    // for that unit in the order a kWireAmpChannel record's `c` field will
+    // index into. Optional -- an EventPublisher that never calls this still
+    // sends a valid (empty, nChannels=0 for every unit) preamble, so a run
+    // with no drift-tracking data configured still speaks valid v2. Must be
+    // called before start() (or at least before the first accept()); it is
+    // not synchronised against a concurrent serverLoop().
+    void setChannelGeometry( const std::vector<std::vector<livewire::ChannelGeom> > &unitChannelGeom,
+                              int templateLength );
+
     // Starts the listen/accept/send thread. Safe to never call: an
     // unstarted publisher still accepts publish() calls and simply drops
     // them, so callers do not need a null check on every event.
@@ -73,6 +85,13 @@ private:
     int   port_;
     std::vector<int> unitIds_;
     livewire::SessionHeader header_;
+
+    // Version-2 preamble, flattened for a single send() each: one count per
+    // unit, then all channels unit-major (see LiveWire.h). Both empty
+    // (nChannels_ all 0) until setChannelGeometry() is called, which is a
+    // valid v2 stream -- just one that carries no drift geometry.
+    std::vector<int32_t>              nChannels_;
+    std::vector<livewire::ChannelGeom> channelGeom_;
 
     // Fixed-capacity ring. head_ is the next write slot; tail_ the next
     // unsent slot. Both only move under ringMutex_.

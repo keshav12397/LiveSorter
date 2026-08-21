@@ -129,6 +129,48 @@ bool LiveWireClient::connect( const std::string &host, int port )
             unitIds_[i] = raw[i];
     }
 
+    // Version-2 channel-geometry preamble (see LiveWire.h). The version
+    // check above already guarantees this stream is exactly
+    // kProtocolVersion, so if that constant is 2 this is always present --
+    // no separate per-field version gate is needed, and a mismatch here is
+    // treated the same as any other truncated preamble.
+    unitChannelGeom_.assign( header_.nUnits, std::vector<livewire::ChannelGeom>() );
+    if( header_.nUnits > 0 ) {
+        std::vector<int32_t> nChannels( header_.nUnits );
+        int bytes = static_cast<int>( nChannels.size() * sizeof(int32_t) );
+        if( !readExactBlocking( reinterpret_cast<char*>( &nChannels[0] ), bytes ) ) {
+            lastError_ = "peer closed partway through the channel-count preamble";
+            disconnect();
+            return false;
+        }
+
+        long long total = 0;
+        for( size_t i = 0; i < nChannels.size(); ++i ) {
+            if( nChannels[i] < 0 ) {
+                lastError_ = "channel-count preamble has a negative count -- stream is corrupt";
+                disconnect();
+                return false;
+            }
+            total += nChannels[i];
+        }
+
+        if( total > 0 ) {
+            std::vector<livewire::ChannelGeom> flat( static_cast<size_t>( total ) );
+            int geomBytes = static_cast<int>( flat.size() * sizeof(livewire::ChannelGeom) );
+            if( !readExactBlocking( reinterpret_cast<char*>( &flat[0] ), geomBytes ) ) {
+                lastError_ = "peer closed partway through the channel-geometry preamble";
+                disconnect();
+                return false;
+            }
+            size_t pos = 0;
+            for( size_t i = 0; i < nChannels.size(); ++i ) {
+                size_t n = static_cast<size_t>( nChannels[i] );
+                unitChannelGeom_[i].assign( flat.begin() + pos, flat.begin() + pos + n );
+                pos += n;
+            }
+        }
+    }
+
     u_long nonblocking = 1;
     ioctlsocket( s, FIONBIO, &nonblocking );
 
@@ -146,6 +188,7 @@ void LiveWireClient::disconnect()
         sock_ = kNoSock;
     }
     connected_ = false;
+    unitChannelGeom_.clear();
 }
 
 
