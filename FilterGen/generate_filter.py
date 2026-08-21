@@ -483,9 +483,31 @@ def noise_cov_by_lag(data_sel, all_spike_times, template_length,
     into this array plus an assembly whose cost depends on the subset size,
     not on the recording length. A unit that has drifted onto different
     channels can therefore be refit without rescanning the data -- see
-    `noise_covariance_from_lags`. Computing this over the whole channel
-    group costs (2L-1) * n_ch^2 floats: 121 * 96 * 96 * 8 B = 8.9 MB for
-    this rig, which is nothing to keep resident.
+    `noise_covariance_from_lags`.
+
+    MEMORY is trivial; TIME is not. The result is (2L-1) * n_ch^2 floats --
+    121 * 96 * 96 * 8 B = 8.9 MB for this rig, nothing to keep resident. But
+    the einsum below computes every channel PAIR at every lag, so the scan
+    is O(n_samples * (2L-1) * n_ch^2), quadratic in channel count:
+
+        n_ch     cost            a 1800 s session at 30 kHz
+          96     784 us/sample   11.8 HOURS
+          16     15.8 us/sample  14 minutes
+           5     2.3 us/sample   2 minutes
+
+    So do NOT call this over the full 96-channel group and treat the result
+    as a cheap one-off. (An earlier version of this docstring effectively
+    did: it quoted 286 s, measured on a 400k-sample fixture ~135x smaller
+    than a real session, and the per-refit figure below was correct while
+    the setup cost was off by two orders of magnitude.)
+
+    Pass a BAND instead -- `data[:, band]` for a slice of channels around the
+    unit, with `sel` then indexed relative to the band. Drift moves a unit's
+    channel set by a few rows, so a ~16-channel neighbourhood covers any
+    plausible excursion at 1/49th the cost. The band has to be chosen wide
+    enough to contain every channel the unit might select after drifting; a
+    selection that escapes the band cannot be assembled from it and must
+    fall back to a rescan.
 
     Everything below is the original vectorized implementation, unchanged.
     It computes every
