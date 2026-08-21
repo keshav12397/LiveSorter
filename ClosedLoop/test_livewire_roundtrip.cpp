@@ -73,6 +73,7 @@ namespace {
 const int kTestPort = 4199;   // not the default, so this never fights a real run
 
 int g_failures = 0;
+static int g_skipped  = 0;
 
 void check( bool cond, const std::string &what )
 {
@@ -554,6 +555,7 @@ int main( int argc, char **argv )
     // -------------------------------------------------------------------
     std::cout << "DriftPool vs FilterGen/drift_estimate.pooled_com_motion fixture\n";
     if( argc < 2 ) {
+        ++g_skipped;
         std::cout << "  SKIP  no fixture path given -- run:\n"
                       "        python FilterGen\\gen_drift_fixture.py --out drift_fixture.bin --bin-s 5.0 --spikes-per-unit 1500\n"
                       "        TestLiveWireRoundtrip.exe drift_fixture.bin\n";
@@ -599,6 +601,17 @@ int main( int argc, char **argv )
         check( maxErr < tol, "pooledMedianMotion matches pooled_com_motion's pooling exactly" );
     }
 
-    std::cout << ( g_failures == 0 ? "PASS\n" : "FAIL\n" );
+    // A bare run skips the ONE check that compares this port against the
+    // Python reference, and a plain "PASS" on that run reads as "the port is
+    // verified" when nothing numerical was verified at all. Say so in the
+    // summary line rather than letting a green bar imply more than it did.
+    if( g_failures != 0 )
+        std::cout << "FAIL\n";
+    else if( g_skipped != 0 )
+        std::cout << "PASS (INCOMPLETE -- " << g_skipped
+                   << " check(s) skipped; the DriftPool-vs-Python equivalence was NOT run.\n"
+                      "       Generate the fixture and pass its path to run it.)\n";
+    else
+        std::cout << "PASS\n";
     return g_failures == 0 ? 0 : 1;
 }
