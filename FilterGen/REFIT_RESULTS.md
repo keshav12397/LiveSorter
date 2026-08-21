@@ -111,10 +111,85 @@ recent data rather than the whole session, at negligible cost in f1.
 wide, but this is a smoke-test population, not an estimate with an error bar
 on it. Worth repeating at 160 units before it is load-bearing.
 
-## Still open
+## Part B: does refitting at the drifted position recover f1?
 
-Whether refitting at a drifted position recovers f1 -- the question part B of
-this investigation was for. The mechanism is now built and tested
-(`banded_refit.py`) and its cost is known; what has not been measured is the
-f1 difference between never refitting, refitting cheaply in-band, and a full
-from-scratch fit at the new position.
+Yes, and the cheap in-band refit gets all of it.
+
+`refit_drift_position_ablation.py`, same session and same chronological
+split, three arms per unit with ONE interferer set fixed across all three
+(so an arm-to-arm difference cannot be a different interferer set):
+
+    never_refit     the train-half filter applied to the test half unchanged
+                    -- the status quo, and the baseline
+    cheap_refit_B   banded_refit.refit_in_band at the predicted drifted
+                    position: motion-corrected template, re-selected
+                    channels, R assembled from the band. No data access.
+    full_refit_B    a genuine rescan of window B (the late train quarter) at
+                    the same predicted position
+
+160 units attempted, **n = 134 complete**. The 26 skips are all the same
+condition -- "not enough trajectory bins to register", i.e. fewer than two
+150-spike bins, so under ~300 train spikes. That is a real limit of the
+method and not a harness failure: a unit that never fires enough to build a
+trajectory cannot have its motion estimated, and there is nothing to
+register it to.
+
+### The result
+
+    cheap_refit_B - never_refit    mean +0.0566  median +0.0151   111 up / 20 down
+    full_refit_B  - never_refit    mean +0.0569  median +0.0149   109 up / 20 down
+    cheap_refit_B - full_refit_B   mean -0.0002  median +0.0000    60 up / 60 down
+
+The third line is the one the online design rests on. **A 2.4 ms
+assemble-and-solve is indistinguishable from a full rescan** -- an exact
+60/60 split and a mean of -0.0002. Banding costs nothing in f1, which is
+what `test_noise_cov_banded.py` proves analytically and this measures
+empirically.
+
+### Split by baseline detectability
+
+Detectability here is bimodal, so a pooled mean describes the mixture rather
+than the method. Broken out by `never_refit` f1:
+
+    band                        n     never -> cheap    mean d   improved
+    usable    (f1 >= 0.30)     29     0.649 -> 0.742    +0.092    23/29
+    marginal  (0.10-0.30)      26     0.179 -> 0.307    +0.128    26/26
+    undetected(f1 < 0.10)      79     0.024 -> 0.044    +0.020    62/79
+
+The marginal band is where this matters most: 26 of 26 improve, and the mean
+moves from unusable toward usable. The 20 regressions are nearly all in the
+undetected band (only 4 have baseline f1 >= 0.30) and the worst is -0.012 --
+noise on units that were not trackable either way.
+
+### The prediction that failed
+
+The benefit was expected to scale with how far a unit drifted. It does not:
+
+    corr(drift_span_um, delta)   all 134 units   -0.187
+                                 usable only     +0.145
+
+Both are approximately nothing, and the reason is visible in the data. The
+drift in this session is COHERENT: the pooled shift is 11.05 um with an SD
+of 0.085 um across all 134 units. Every unit receives essentially the same
+correction, so there is no variation in applied shift for a benefit to
+correlate with. Per-unit `drift_span_um` (mean 33, SD 34, max 188) is
+dominated by trajectory-estimation noise on low-count units, not by real
+differential motion.
+
+So the absence of a correlation here is not evidence against the mechanism;
+it is evidence that this dataset cannot test that particular claim. A
+session with genuinely non-rigid drift could.
+
+### What this does and does not license
+
+It licenses the online design: scan a band once per unit under its own
+exclusion mask, and refit from it whenever the motion estimate says the unit
+moved. Part A priced the covariance window (60 s is ~free); Part B prices
+the refit itself (in-band == full rescan). Both halves are now measured.
+
+It does not license claims about real recordings. This is the 160-unit
+simulator with imposed coherent drift, and the same caveat
+`DRIFT_AWARE_RESULTS.md` carries applies unchanged: the amplitudes,
+waveforms, and drift are all drawn by the simulator. The real test is
+`D:/catgt_Lav69_d1.0_g0` against Kilosort's own `dshift`, which has not
+been run.
