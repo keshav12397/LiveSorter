@@ -483,9 +483,31 @@ def noise_cov_by_lag(data_sel, all_spike_times, template_length,
     into this array plus an assembly whose cost depends on the subset size,
     not on the recording length. A unit that has drifted onto different
     channels can therefore be refit without rescanning the data -- see
-    `noise_covariance_from_lags`. Computing this over the whole channel
-    group costs (2L-1) * n_ch^2 floats: 121 * 96 * 96 * 8 B = 8.9 MB for
-    this rig, which is nothing to keep resident.
+    `noise_covariance_from_lags`.
+
+    MEMORY is trivial; TIME is not. The result is (2L-1) * n_ch^2 floats --
+    121 * 96 * 96 * 8 B = 8.9 MB for this rig, nothing to keep resident. But
+    the einsum below computes every channel PAIR at every lag, so the scan
+    is O(n_samples * (2L-1) * n_ch^2), quadratic in channel count:
+
+        n_ch     cost            a 1800 s session at 30 kHz
+          96     784 us/sample   11.8 HOURS
+          16     15.8 us/sample  14 minutes
+           5     2.3 us/sample   2 minutes
+
+    So do NOT call this over the full 96-channel group and treat the result
+    as a cheap one-off. (An earlier version of this docstring effectively
+    did: it quoted 286 s, measured on a 400k-sample fixture ~135x smaller
+    than a real session, and the per-refit figure below was correct while
+    the setup cost was off by two orders of magnitude.)
+
+    Pass a BAND instead -- `data[:, band]` for a slice of channels around the
+    unit, with `sel` then indexed relative to the band. Drift moves a unit's
+    channel set by a few rows, so a ~16-channel neighbourhood covers any
+    plausible excursion at 1/49th the cost. The band has to be chosen wide
+    enough to contain every channel the unit might select after drifting; a
+    selection that escapes the band cannot be assembled from it and must
+    fall back to a rescan.
 
     Everything below is the original vectorized implementation, unchanged.
     It computes every
@@ -549,6 +571,42 @@ def noise_cov_by_lag(data_sel, all_spike_times, template_length,
         raise ValueError("No sufficiently long spike-free segments found "
                           "for noise covariance estimation.")
     total_len = int(lengths.sum())
+
+    # How much data actually went in, and a warning when it is not enough.
+    #
+    # The failure this catches is silent, not loud. Excluding EVERY sorted
+    # unit's spikes from a dense recording leaves almost no spike-free time:
+    # measured on a 160-unit session, the 900 s train half came out 99.5%
+    # spike-present, with 13 usable gaps totalling 1869 samples -- 0.06 s.
+    # That does not raise above, because 13 segments is not 0. It returns a
+    # (2L-1, n_ch, n_ch) array estimated from 1869 samples and looks exactly
+    # like a real answer.
+    #
+    # The threshold is set against what R actually costs to estimate. The
+    # assembled matrix is (template_length * n_selected)^2, and a covariance
+    # wants an order of magnitude more samples than its dimension. This
+    # function does not know n_selected -- that is chosen per unit, after
+    # this runs -- so the floor assumes the 5-channel selection this rig
+    # uses: 10 * 5 * template_length. Below that, R is being estimated from
+    # fewer than ~10 samples per dimension and the ridge is doing the work.
+    #
+    # The 1869-sample case above sits at 6 samples per dimension, so a
+    # looser floor would have let exactly the case this exists for pass.
+    #
+    # Note that intervals OVERLAP heavily at these rates, so estimating
+    # coverage by summing (spike count x blanking width) is badly wrong:
+    # that arithmetic gave 5.2x oversubscribed where the true coverage was
+    # 99.5%. Measure the union, or just read total_len here.
+    if total_len < 50 * template_length:
+        import warnings
+        warnings.warn(
+            "noise covariance estimated from only {} samples in {} segments "
+            "({:.3f} s at 30 kHz). The exclusion set may be leaving almost no "
+            "spike-free data -- excluding every sorted unit in a dense "
+            "recording typically does. The returned array is shaped like a "
+            "valid estimate but is not one.".format(
+                total_len, starts.size, total_len / 30000.0 ),
+            RuntimeWarning, stacklevel=2 )
 
     maxlag = template_length - 1
     nlags = 2 * maxlag + 1
