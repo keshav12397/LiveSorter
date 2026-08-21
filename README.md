@@ -54,13 +54,49 @@ the drift-aware path needs, since `calibrate_drift_aware.py` also writes
 `drift_schedule.bin` and `calibrate_all_units.py` does not. Calibration is
 skipped by default only when no `trainingKsDir` is given.
 
-The fit itself is `FilterGen/calibrate_all_units.py`, shelled out to via
-`RunProcess.h`. **The Python is the single implementation** of "fit a
-filter" and "score a threshold"; `CalibrateAllUnits.exe` is a C++ port of
-the same control flow for machines without Python, and this repo has twice
-lost recall to a second implementation of shared math drifting out of sync.
-The single-target `ClosedLoop.exe` has always worked this way
-(`calibrate_for_closedloop.py`); the all-units path now matches it.
+### Two backends, and why `python` is the default
+
+`calibrationBackend=python` (default) runs
+`FilterGen/calibrate_all_units.py`. `calibrationBackend=cpp` runs
+`CalibrateAllUnits.exe` instead and needs no Python on the rig. Both write
+the same five files; the C++ one takes a config with different key names, so
+a translated `_calibrate_all_units.generated.txt` is written into
+`filterDir` and left there as the exact input that produced the bank.
+
+**They do not produce the same bank.** Measured on 4 units of the simulated
+session:
+
+    channel selection identical on   1 of 4 units
+    unit 51 (channels DID match)     tap corr 0.758, rel error 0.66
+    f1                               mean -0.013, max |delta| 0.026
+
+Same units selected, different channels on three of them, and on the one
+unit where the channel sets agree the taps correlate at 0.758 — a different
+filter, not float noise. The six equivalence tests all still pass: they pin
+the LCMV solve, the noise covariance and the scorer, and the divergence
+lives in what they do not cover — candidate selection, interferer picking,
+and RNG draws.
+
+**Switching backend is a recalibration, not a no-op.** Validate before
+relying on a `cpp` bank.
+
+And `cpp` buys nothing but independence from Python:
+
+    backend   runtime    peak private   peak working set
+    python     394.4 s       3.82 GB          61.03 GB
+    cpp        387.1 s       3.99 GB           9.56 GB
+
+Runtime is a wash (2%, within noise) and private memory is near-identical;
+both are dominated by the same ~20.7 GB preprocessing pass. The working-set
+gap is *not* a real difference — it is shared pages of the memory-mapped
+scratch file. Do not read a working set as memory used; that misreading has
+already produced one wrong conclusion in this project.
+
+This is why the Python stays the reference: it is the single implementation
+of "fit a filter" and "score a threshold", and this repo has twice lost
+recall to a second implementation of shared math drifting out of sync. The
+single-target `ClosedLoop.exe` has always had the same switch, with the same
+default and the same reasoning.
 
 Tuning keys — `autoInterferers`, `calibrationTrainFrac`,
 `calibrationMaxUnits`, `calibrationWorkers`, `calibrationMinSpikes`,
