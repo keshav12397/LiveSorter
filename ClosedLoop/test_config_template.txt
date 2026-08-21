@@ -1,0 +1,82 @@
+# Runnable template for ClosedLoopAllUnits.exe.
+#
+# Copy this, point the paths at your own session, and run:
+#     ClosedLoopAllUnits.exe my_config.txt
+#
+# This is a TEMPLATE, not a reference. `config.example.txt` documents every
+# key the pipeline understands, including the ones for the single-target
+# ClosedLoop.exe path; this file is the minimum set needed to get a live
+# all-units run going, with values that are sane rather than exhaustive.
+#
+# Every path below is an example and will not exist on your machine.
+
+# ---- SpikeGLX ------------------------------------------------------------
+# Connects to an ALREADY-RUNNING instance. This app never starts, stops, or
+# reconfigures SpikeGLX.
+sglxHost=localhost
+sglxPort=4142
+
+# ---- Filter bank ---------------------------------------------------------
+# Written by FilterGen/calibrate_all_units.py (or calibrate_drift_aware.py,
+# which additionally writes drift_schedule.bin into the same directory --
+# picked up automatically when present, ignored when absent).
+filterDir=D:/your_session/filters
+templateLength=61
+filterNChannels=5
+
+# CAR MUST be computed over the exact channel group the filters were fit
+# against. This has to be the same file calibrate_all_units.py's
+# --channel-map-json was given; a different group silently invalidates every
+# threshold. See README.md, "Preprocessing must match training".
+carChannelMapJson=D:/your_session/shank1only.json
+applyHighpass=true
+highpassCutoffHz=300
+
+# ---- Fetch ---------------------------------------------------------------
+fetchChunkMs=5
+imecSyncBit=6
+
+# ---- Syllable source -----------------------------------------------------
+# `ni` is PRODUCTION: NiFetchThread decodes the NI digital word.
+# `imecSy` is a TEST path for a rig whose NI stream cannot carry synthetic
+# codes -- it reads them from the IMEC SY word's low bits instead, creating
+# no NI handle and no NI thread. The binary announces loudly when it is on.
+syllableSource=ni
+niSyncBit=0
+niSyllableLines=5,6,7
+niDebounceSamples=10
+# Only read when syllableSource=imecSy:
+imecSyllableBits=0,1,2
+
+# ---- Decision ------------------------------------------------------------
+# decisionUnitIds is REQUIRED in spirit: "any of 160 units fired" is not a
+# decision about anything, so name the Kilosort cluster id(s) that may drive
+# the output.
+decisionUnitIds=51
+windowStartMs=0
+windowEndMs=100
+spikeCountThreshold=3
+
+# The digital line this raises is real hardware. Set spikeCountThreshold
+# unreachably high (e.g. 999999) when you want to exercise the detection and
+# analysis path WITHOUT firing anything downstream.
+doLine=Dev4/port0/line5
+doPulseMs=50
+
+# ---- Outputs -------------------------------------------------------------
+spikeTimesPath=D:/scratch/spikeTimes.csv
+syllableTimesPath=D:/scratch/syllableTimes.csv
+decisionLogPath=D:/scratch/decisions.log
+decisionCsvPath=D:/scratch/decisions.csv
+# Per-chunk detection-pipeline timing. Every row means the same thing --
+# there is no warm-up chunk to discard.
+latencyLogPath=D:/scratch/latency.csv
+
+# ---- Live viewer ---------------------------------------------------------
+# Connect with:  SpikeViewer.exe --live localhost:4143
+# Without --live the viewer starts in CSV mode and never connects.
+viewerEnabled=true
+viewerPort=4143
+
+# 0 = run until Ctrl-C.
+runDurationSec=30

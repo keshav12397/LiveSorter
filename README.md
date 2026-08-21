@@ -22,7 +22,7 @@ app (`ClosedLoop/`).
 | `ClosedLoop.exe` | `main.cpp` | Single-target path. The original pipeline; kept as a working reference. |
 | `CalibrateAllUnits.exe` | `mainCalibrateAllUnits.cpp` | Batch offline calibration — fits and threshold-sweeps every unit. |
 | `OfflineReplay.exe` | `mainOfflineReplay.cpp` | Replays a `.bin` through detection + decision. **Not** a test of the live path. |
-| `SpikeViewer.exe` | `Viewer/main.cpp` | Live raster, decisions, and drift trace over a localhost socket. |
+| `SpikeViewer.exe` | `Viewer/main.cpp` | Live raster, decisions, and drift trace over a localhost socket. Needs `--live host:port`; without it it opens in CSV mode and never connects. |
 
 `OfflineReplay` has no `sglx_fetch`, no ring buffer, no sample accounting,
 and no wall-clock pressure on a fetch loop. Those four things are exactly
@@ -116,11 +116,20 @@ and the threshold calibrated against training becomes meaningless.
 
 ### Channel indices
 
-`MultiFilterBank.channels` holds **raw SpikeGLX ids** until
-`ImecFetchThreadCpu` translates them into positions within the CAR group and
-writes the result back. Everything downstream indexes the preprocessed
-group. The bank is passed by value into the fetch thread so this mutation
-stays local.
+`MultiFilterBank.channels` holds **raw SpikeGLX ids** as loaded from disk.
+Anything that reads sample data by channel needs them translated to
+positions within the CAR group first.
+
+`MultiFilterBank::translateChannelsToCarGroup()` is the single
+implementation. Call it once, immediately after `load()` — it is not
+idempotent, and calling it twice translates twice.
+
+Two consumers need a translated bank and each translates its own copy: the
+fetch thread (which takes the bank by value) and the analysis thread. **This
+failure is silent**: a raw probe id is usually still a plausible index, and
+one that is out of range looks identical to a genuinely bad channel, which
+callers correctly skip. Handing the analysis thread an untranslated bank
+produced zero amplitude records on a live run with no error at all.
 
 ### Detected-spike sample time
 
@@ -214,6 +223,31 @@ Caveat: this is a simulator with imposed coherent drift. The pooled shift is
 correction — which is why the benefit does *not* correlate with per-unit
 drift span here, and why that particular claim is untested rather than
 refuted.
+
+### Applying a schedule live
+
+`calibrate_drift_aware.py` writes `drift_schedule.bin` alongside the filter
+files: one filter-swap event per drifted segment. `ClosedLoopAllUnits` loads
+it automatically when present (an absent file is the normal case and loads
+as an empty schedule) and applies each swap as its time arrives.
+
+Two things about that are easy to get wrong:
+
+- **Swaps go through `MultiConvolutionEngine::updateUnit()`, never
+  `MultiFilterBank::updateFilters()` alone.** The engine widens taps to
+  double at construction, so writing the bank alone leaves the copy that
+  actually scores untouched — a swap that silently does nothing.
+- **Schedule time is stream time**, samples since the first fetch, not wall
+  clock. A fetch stall must not slide the schedule relative to the data.
+
+The schedule's `t_s` is "seconds from the calibration recording's start",
+mapped onto "seconds since this run's first fetch". That is an **open-loop
+plan replayed on a timer**, correct only if the live session begins at the
+same point in the drift trajectory the calibration recording did. Closing
+the loop — the live tracker feeding measured motion back — is not built.
+
+The shutdown line distinguishes applied, rejected, and never-came-due. A
+rejected swap names a channel outside the CAR group and says so.
 
 ### Live drift tracking
 
@@ -315,7 +349,15 @@ Python tests: `python -m pytest FilterGen -v`.
 ClosedLoopAllUnits.exe path\to\config.txt
 ```
 
-`ClosedLoop/config.example.txt` documents every key inline.
+### Configs
+
+| file | what it is |
+|---|---|
+| `ClosedLoop/config.example.txt` | the exhaustive reference — every key the pipeline understands, documented inline, including the single-target `ClosedLoop.exe` keys |
+| `ClosedLoop/test_config_template.txt` | a runnable template — the minimum set for a live all-units run. Copy it and repoint the paths |
+
+Both are templates. Neither is a config for a real session, and every path
+in them is an example.
 
 Two keys are worth knowing before a real experiment:
 

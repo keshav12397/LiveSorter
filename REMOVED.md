@@ -165,7 +165,52 @@ intervals overlap heavily at 1570 spikes/s. Measure the union.
 
 ---
 
-## 5. README narrative moved here
+## 5. The four test_config files
+
+Removed: `test_config.txt`, `test_config_fixed_threshold.txt`,
+`test_config_offline_replay.txt`, `test_config_all_units_live_verify.txt`.
+Replaced by one runnable template, `test_config_template.txt`.
+
+They were per-machine scratch configs with hard-coded `D:/` paths from
+specific past sessions, not templates anyone could copy. Two
+(`test_config.txt`, `test_config_fixed_threshold.txt`) were single-target
+configs carrying `targetId=74`; the other two were all-units. None of them
+were referenced by any code, task, or test.
+
+`config.example.txt` remains the exhaustive key-by-key reference.
+`test_config_template.txt` is the minimum runnable all-units set.
+
+### Findings rescued from their comments
+
+`test_config_all_units_live_verify.txt` recorded a real verification run in
+its header, and two things in it are worth keeping.
+
+**The live path holds up with a viewer attached.** Two 30 s runs against the
+real `ImecFetchThreadCpu`/`sglx_fetch` path:
+
+    run 1 (no viewer)     span 900175 samples, processed 900175, 0 dropped,
+                          0 fetch errors, max backlog 62 samples (2.07 ms)
+    run 2 (viewer live)   span 900340, processed 900340, 0 dropped,
+                          0 fetch errors, max backlog 306 samples (10.2 ms)
+                          viewer socket: 98011 records published, 0 dropped
+
+Backlog rises with a viewer attached but stays nowhere near the ~8 s server
+ring, and nothing drops. This is also the record that the viewer's live leg
+DOES work when launched as `SpikeViewer.exe --live 127.0.0.1:4143` -- worth
+knowing, because a viewer started without `--live` opens in CSV mode and
+never connects, which looks identical to a broken socket.
+
+**An unresolved DecisionThread throughput ceiling.** In run 2, 215,719
+detections in 30 s (~7.2k/s across 160 units) drove `spike_count` to 0-1
+despite `spikeCountThreshold=3`. The same ceiling had been seen in
+offline-replay findings, and this run confirmed it is real on the live path
+rather than an offline-tool artifact. **Still open** -- it is a property of
+the decision stage, not of the queue split measured later, and nothing in
+the drift or amplitude work touched it.
+
+---
+
+## 6. README narrative moved here
 
 The previous README was 852 lines, of which roughly half was investigation
 history: sections titled "Why the earlier measurement said the opposite",
@@ -221,10 +266,18 @@ Decisions made deliberately, so they are not revisited as oversights:
 
 ## What is still unfinished
 
-- `DriftSchedule` is not wired into `ImecFetchThreadCpu`.
+- Closing the drift loop. `DriftSchedule` IS now wired into
+  `ImecFetchThreadCpu` and verified live (4 of 4 swaps applied), but it
+  replays a precomputed plan on a timer. The live tracker's measured motion
+  does not feed back into which filters are used.
 - The drift work is validated on a simulator with imposed coherent drift.
   The real comparison — `D:/catgt_Lav69_d1.0_g0` against Kilosort's own
   `dshift` — has not been run.
-- `AnalysisThread`'s amplitude extraction has not been exercised against a
-  live SpikeGLX session, only against synthetic chunks and the roundtrip
-  test.
+- The viewer's own drift plot. Amplitude extraction is verified live
+  (116,223 spikes -> 581,115 records, exactly 5 per spike, 0 out of span),
+  and `DriftPool` matches the Python reference exactly on a fixture, but
+  nobody has watched the trace render from live records end to end.
+- A **DecisionThread throughput ceiling**, recorded above: at ~7.2k
+  detections/s the spike count saturates at 0-1 regardless of
+  `spikeCountThreshold`. Confirmed on both the offline and live paths.
+  Untouched by the queue, drift, and amplitude work.
