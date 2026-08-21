@@ -163,7 +163,8 @@ def load_and_prepare(args, rng, dtype=np.float64, order="C"):
 def fit_lcmv(data, spike_t, spike_cl, np_ch, target, interferer_ids,
              n_channels, template_length, template_offset, ridge, max_spikes, rng,
              template_spike_t=None, template_spike_cl=None, extras=None,
-             target_waveform_override=None):
+             target_waveform_override=None, cov_by_lag=None, R_override=None,
+             cov_max_samples=None):
     """Fit one LCMV filter. This is the single implementation of the fit --
     calibrate_for_closedloop.py, calibrate_all_units.py and
     calibrate_drift_aware.py all call it rather than carrying their own copy.
@@ -187,6 +188,41 @@ def fit_lcmv(data, spike_t, spike_cl, np_ch, target, interferer_ids,
     as before, on whatever this template says. Interferer templates are
     unaffected -- only the target's smearing is what registration exists
     to fix (see motion_correct.py's docstring).
+
+    `cov_by_lag`, when given, is a `(2*template_length-1, n_ch, n_ch)` per-lag
+    covariance over `data`'s FULL channel group (generate_filter.noise_cov_by_lag's
+    output -- see that function and noise_covariance_from_lags for the
+    block-Toeplitz argument this rests on, and test_noise_cov_subset.py for
+    the equivalence proof). R is then assembled by
+    `generate_filter.noise_covariance_from_lags(cov_by_lag, sel, template_length)`
+    -- an index-and-assemble, no data access -- instead of rescanning `data`
+    for this unit's noise covariance. This is what makes a REFIT cheap: `sel`
+    (this fit's channel selection) can come from data the caller never passed
+    a rescan over (e.g. a later time window than `cov_by_lag` was built
+    from), which is exactly the drifted-position refit case. Ignored if
+    `R_override` is given. Mutually exclusive in effect with the default
+    per-unit-exclusion rescan -- passing this is what changes what R means,
+    see refit_exclusion_ablation.py.
+
+    `R_override`, when given, is used as R directly (already the full
+    `template_length*n_channels` square matrix for the channel selection this
+    fit will make -- caller's responsibility to match `sel`). Takes priority
+    over `cov_by_lag`. For a full from-scratch rescan at a specific window
+    the caller already has as `data`, just leave both None.
+
+    `cov_max_samples` caps how many samples the DEFAULT rescan path looks at,
+    defaulting to all of them. It exists so a caller can hold the amount of
+    data constant while varying the exclusion set.
+
+    That control is not optional for any comparison against `cov_by_lag`.
+    Building a shared per-lag array over the whole channel group is
+    O(n_samples * (2L-1) * n_ch^2) -- see noise_cov_by_lag -- so in practice
+    a shared array is built from a short window (tens of seconds) while this
+    rescan, needing only 5 channels, can afford the whole recording. Comparing
+    the two as-is varies BOTH the exclusion set and the amount of data behind
+    R, by a factor of ~30, and a difference in the result could not be
+    attributed to either. Cap this to the shared array's window and only the
+    exclusion set differs.
 
     `extras`, if a dict is passed, receives the channel-subset templates the
     fit built. They are needed to compute the filter's detection lag (see
@@ -218,13 +254,20 @@ def fit_lcmv(data, spike_t, spike_cl, np_ch, target, interferer_ids,
     s = target_wf[:, sel]
     interferer_wfs_sel = [wf[:, sel] for wf in interferer_wfs]
 
-    local_spike_times = np.sort(np.concatenate([target_spikes] + interferer_times))
-    # Vectorized version (numerically verified equivalent to noise_covariance,
-    # faster on long spike-free segments -- see its docstring) used for both
-    # calibrate_for_closedloop.py (single-target) and calibrate_all_units.py
-    # (batch) since they share this one fit_lcmv, not forked per-caller.
-    R = gf.noise_covariance_vectorized(data_sel, local_spike_times, template_length,
-                                        template_offset, data_sel.shape[0])
+    if R_override is not None:
+        R = R_override
+    elif cov_by_lag is not None:
+        R = gf.noise_covariance_from_lags(cov_by_lag, sel, template_length)
+    else:
+        local_spike_times = np.sort(np.concatenate([target_spikes] + interferer_times))
+        # Vectorized version (numerically verified equivalent to noise_covariance,
+        # faster on long spike-free segments -- see its docstring) used for both
+        # calibrate_for_closedloop.py (single-target) and calibrate_all_units.py
+        # (batch) since they share this one fit_lcmv, not forked per-caller.
+        n_cov = data_sel.shape[0] if cov_max_samples is None \
+            else min(int(cov_max_samples), data_sel.shape[0])
+        R = gf.noise_covariance_vectorized(data_sel, local_spike_times, template_length,
+                                            template_offset, n_cov)
 
     s_flat = s.T.ravel()
     interferer_flats = [wf.T.ravel() for wf in interferer_wfs_sel]
