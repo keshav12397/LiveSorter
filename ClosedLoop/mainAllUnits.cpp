@@ -54,6 +54,7 @@
 #include "NiFetchThread.h"
 #include "DecisionThread.h"
 #include "EventPublisher.h"
+#include "SglxMetaReader.h"
 
 namespace {
 
@@ -207,6 +208,51 @@ int main( int argc, char **argv )
         EventPublisher publisher(
             cfg.getInt( "viewerPort", livewire::kDefaultPort ),
             filterBank.hostUnitIds, imecRate, niRate, useImecSy );
+
+        // Version-2 channel-geometry preamble (see LiveWire.h) -- the live
+        // drift tracker's only per-run input besides the amplitude records
+        // themselves. Built from filterBank.channels BEFORE
+        // ImecFetchThreadCpu's constructor runs: that thread keeps its own
+        // COPY of filterBank (see ImecFetchThreadCpu.h) and translates raw
+        // SpikeGLX channel ids to CAR-group positions in place on that
+        // copy, so this `filterBank` -- main's own, never passed by
+        // reference into the thread -- stays in raw-id form for as long as
+        // main holds it, independent of where this code sits relative to
+        // the thread constructor below.
+        {
+            std::map<int, std::pair<double, double> > chanPos =
+                loadChanMapPositions( carChannelMapJson );
+            if( chanPos.empty() ) {
+                std::cout << "EventPublisher: " << carChannelMapJson
+                           << " has no xc/yc fields -- viewer drift tracker "
+                              "will get index-based fallback positions, not true depth\n";
+            }
+
+            std::vector<std::vector<livewire::ChannelGeom> > unitChannelGeom(
+                filterBank.nUnits );
+            for( int u = 0; u < filterBank.nUnits; ++u ) {
+                const int32_t *chans = filterBank.unitChannels( u );
+                std::vector<livewire::ChannelGeom> &geom = unitChannelGeom[u];
+                geom.resize( filterBank.nChannelsPerUnit );
+                for( int c = 0; c < filterBank.nChannelsPerUnit; ++c ) {
+                    std::map<int, std::pair<double, double> >::const_iterator it =
+                        chanPos.find( static_cast<int>( chans[c] ) );
+                    if( it != chanPos.end() ) {
+                        geom[c].xUm = static_cast<float>( it->second.first );
+                        geom[c].yUm = static_cast<float>( it->second.second );
+                    }
+                    else {
+                        // Same nominal-15-um-pitch fallback
+                        // FilterGen/drift_estimate.py's channel_y_for_group
+                        // uses for a channel missing from the map, so a
+                        // partial map degrades the same way on both ends.
+                        geom[c].xUm = 0.0f;
+                        geom[c].yUm = 15.0f * static_cast<float>( c );
+                    }
+                }
+            }
+            publisher.setChannelGeometry( unitChannelGeom, filterBank.templateLength );
+        }
 
         EventPublisher *pub = 0;
         if( cfg.getBool( "viewerEnabled", true ) ) {
