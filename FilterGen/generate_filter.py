@@ -572,6 +572,42 @@ def noise_cov_by_lag(data_sel, all_spike_times, template_length,
                           "for noise covariance estimation.")
     total_len = int(lengths.sum())
 
+    # How much data actually went in, and a warning when it is not enough.
+    #
+    # The failure this catches is silent, not loud. Excluding EVERY sorted
+    # unit's spikes from a dense recording leaves almost no spike-free time:
+    # measured on a 160-unit session, the 900 s train half came out 99.5%
+    # spike-present, with 13 usable gaps totalling 1869 samples -- 0.06 s.
+    # That does not raise above, because 13 segments is not 0. It returns a
+    # (2L-1, n_ch, n_ch) array estimated from 1869 samples and looks exactly
+    # like a real answer.
+    #
+    # The threshold is set against what R actually costs to estimate. The
+    # assembled matrix is (template_length * n_selected)^2, and a covariance
+    # wants an order of magnitude more samples than its dimension. This
+    # function does not know n_selected -- that is chosen per unit, after
+    # this runs -- so the floor assumes the 5-channel selection this rig
+    # uses: 10 * 5 * template_length. Below that, R is being estimated from
+    # fewer than ~10 samples per dimension and the ridge is doing the work.
+    #
+    # The 1869-sample case above sits at 6 samples per dimension, so a
+    # looser floor would have let exactly the case this exists for pass.
+    #
+    # Note that intervals OVERLAP heavily at these rates, so estimating
+    # coverage by summing (spike count x blanking width) is badly wrong:
+    # that arithmetic gave 5.2x oversubscribed where the true coverage was
+    # 99.5%. Measure the union, or just read total_len here.
+    if total_len < 50 * template_length:
+        import warnings
+        warnings.warn(
+            "noise covariance estimated from only {} samples in {} segments "
+            "({:.3f} s at 30 kHz). The exclusion set may be leaving almost no "
+            "spike-free data -- excluding every sorted unit in a dense "
+            "recording typically does. The returned array is shaped like a "
+            "valid estimate but is not one.".format(
+                total_len, starts.size, total_len / 30000.0 ),
+            RuntimeWarning, stacklevel=2 )
+
     maxlag = template_length - 1
     nlags = 2 * maxlag + 1
     acc = np.zeros((nlags, n_ch, n_ch), dtype=np.float64)  # float64 accumulator regardless of data dtype -- see fit_lcmv's precision-boundary note
