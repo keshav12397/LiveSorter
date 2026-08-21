@@ -65,6 +65,7 @@
 #include "SyllableDecoder.h"
 #include "SyncEdgeTracker.h"
 #include "ThreadSafeQueue.h"
+#include "SpikeQueue.h"
 #include "DecisionThread.h"
 
 namespace {
@@ -322,7 +323,7 @@ int main( int argc, char **argv )
         if( decisionUnitIds.empty() )
             throw std::runtime_error( "Config: 'decisionUnitIds' is required (see mainAllUnits.cpp)" );
 
-        ThreadSafeQueue<SpikeEvent>    spikeQueue;
+        SpikeQueue                     spikeQueue;
         ThreadSafeQueue<SyllableEvent> syllableQueue;
 
         DecisionThread decisionThread(

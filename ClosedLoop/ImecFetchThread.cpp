@@ -21,7 +21,7 @@ ImecFetchThread::ImecFetchThread( void *hSglx, FilterBank &filterBank,
                                    const std::string &carChannelMapJsonPath,
                                    bool applyHighpass, double highpassCutoffHz,
                                    int imecSyncBit, int fetchChunkMs,
-                                   ThreadSafeQueue<SpikeEvent> &spikeQueue,
+                                   SpikeQueue &spikeQueue,
                                    const std::string &spikeTimesPath )
     :   hSglx_( hSglx ), filterBank_( filterBank ),
         carChannelMapJsonPath_( carChannelMapJsonPath ),

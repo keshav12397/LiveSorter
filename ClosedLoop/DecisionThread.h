@@ -10,6 +10,7 @@
 #include <chrono>
 
 #include "ThreadSafeQueue.h"
+#include "SpikeQueue.h"
 #include "Events.h"
 
 class EventPublisher;
@@ -43,7 +44,7 @@ public:
     //
     // publisher: optional live viewer feed (see EventPublisher.h); nullptr
     // means this class behaves as it did before the viewer existed.
-    DecisionThread( void *hSglx, ThreadSafeQueue<SpikeEvent> &spikeQueue,
+    DecisionThread( void *hSglx, SpikeQueue &spikeQueue,
                      ThreadSafeQueue<SyllableEvent> &syllableQueue,
                      double windowStartS, double windowEndS, int spikeCountThreshold,
                      const std::string &doLine, int doPulseMs,
@@ -74,8 +75,13 @@ private:
     };
 
     void *hSglx_;
-    ThreadSafeQueue<SpikeEvent>    &spikeQueue_;
+    SpikeQueue                     &spikeQueue_;
     ThreadSafeQueue<SyllableEvent> &syllableQueue_;
+
+    // Reused across runLoop() passes so draining the HOT queue never
+    // allocates in steady state -- see SpikeQueue::drain()'s own comment on
+    // why draining rather than popping one at a time matters here.
+    std::vector<SpikeEvent> spikeDrainBuf_;
 
     double windowStartS_, windowEndS_;
     int    spikeCountThreshold_;

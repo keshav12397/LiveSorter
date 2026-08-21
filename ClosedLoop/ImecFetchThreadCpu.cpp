@@ -30,9 +30,10 @@ ImecFetchThreadCpu::ImecFetchThreadCpu( void *hSglx, const MultiFilterBank &filt
                                          int imecSyncBit, int fetchChunkMs,
                                          const std::string &spikeTimesPath,
                                          const std::string &latencyLogPath,
-                                         ThreadSafeQueue<SpikeEvent> *spikeQueue,
+                                         SpikeQueue *spikeQueue,
                                          EventPublisher *publisher,
-                                         const SyllableFromSy &syllableFromSy )
+                                         const SyllableFromSy &syllableFromSy,
+                                         AnalysisFeed *analysisFeed )
     :   hSglx_( hSglx ), filterBank_( filterBank ),
         carChannelMapJsonPath_( carChannelMapJsonPath ),
         applyHighpass_( applyHighpass ), highpassCutoffHz_( highpassCutoffHz ),
@@ -40,6 +41,7 @@ ImecFetchThreadCpu::ImecFetchThreadCpu( void *hSglx, const MultiFilterBank &filt
         spikeTimesPath_( spikeTimesPath ), latencyLogPath_( latencyLogPath ),
         spikeQueue_( spikeQueue ), publisher_( publisher ),
         syllableFromSy_( syllableFromSy ),
+        analysisFeed_( analysisFeed ),
         stopFlag_( false )
 {}
 
@@ -205,6 +207,14 @@ void ImecFetchThreadCpu::fetchLoop()
     // fetch loop. Reserve one chunk's worst case: every unit firing once.
     std::vector<livewire::WireRecord> wireBatch;
     wireBatch.reserve( static_cast<size_t>( filterBank_.nUnits ) );
+
+    // Reused across chunks for the HOT queue's batched push -- one lock
+    // acquisition per chunk on SpikeQueue rather than one per spike (see
+    // SpikeQueue.h). Also handed by value into AnalysisFeed::Chunk::spikes
+    // when the SLOW side is wired, so the analysis thread does not have to
+    // re-derive which detections belong to which chunk.
+    std::vector<SpikeEvent> spikeBatch;
+    spikeBatch.reserve( static_cast<size_t>( filterBank_.nUnits ) );
 
     StreamAccountant acct;
     // Backlog costs an extra round-trip to ask for, so sample it
@@ -384,10 +394,11 @@ void ImecFetchThreadCpu::fetchLoop()
 
         if( !detections.empty() ) {
 
-            // One reusable buffer, filled per chunk and published in a
-            // single batched call, so the publisher's mutex is taken once
-            // per chunk rather than once per spike.
+            // Two reusable buffers, filled per chunk and each handed off in
+            // one batched call -- the publisher's mutex and the HOT queue's
+            // mutex are each taken once per chunk rather than once per spike.
             wireBatch.clear();
+            spikeBatch.clear();
 
             for( size_t d = 0; d < detections.size(); ++d ) {
 
@@ -411,7 +422,7 @@ void ImecFetchThreadCpu::fetchLoop()
                     ev.timeRelSyncS = relS;
                     ev.sampleIndex  = detections[d].sampleIndex;
                     ev.unitId       = unitId;   // real Kilosort cluster id -- see Events.h
-                    spikeQueue_->push( ev );
+                    spikeBatch.push_back( ev );
                 }
 
                 if( publisher_ ) {
@@ -422,8 +433,50 @@ void ImecFetchThreadCpu::fetchLoop()
                 }
             }
 
+            // HOT path: one lock, one batched push. This is the only place
+            // spikeQueue_ is touched -- see SpikeQueue.h for why per-spike
+            // pushes here would have been the same std::deque-allocation
+            // trap RingDeque.h documents.
+            if( spikeQueue_ && !spikeBatch.empty() )
+                spikeQueue_->push( spikeBatch.data(), spikeBatch.size() );
+
             if( publisher_ && !wireBatch.empty() )
                 publisher_->publish( &wireBatch[0], wireBatch.size() );
+        }
+        else {
+            spikeBatch.clear();
+        }
+
+        // SLOW path: hand the preprocessed chunk to the analysis feed,
+        // independent of whether it carried any detections -- drift
+        // estimation needs the bulk samples regardless. acquire() returning
+        // nullptr means the analysis thread is behind; that chunk is simply
+        // skipped here (see AnalysisFeed.h's ownership contract), never
+        // waited or retried, so this can never add latency to the hot path
+        // above it.
+        if( analysisFeed_ ) {
+            int poolIndex = -1;
+            float *dst = analysisFeed_->acquire( poolIndex );
+            if( dst ) {
+                const size_t n = static_cast<size_t>( tpts ) * nCarChans;
+                const double *src = preprocessed.data();
+                for( size_t i = 0; i < n; ++i )
+                    dst[i] = static_cast<float>( src[i] );
+
+                AnalysisFeed::Chunk c;
+                c.samples          = dst;
+                c.nSamples         = static_cast<int>( tpts );
+                c.nChannels        = nCarChans;
+                c.firstSampleIndex = static_cast<long long>( headCt );
+                c.timeRelSyncS     = syncTracker.hasEdge()
+                                      ? syncTracker.secondsSinceLastEdge(
+                                            static_cast<long long>( headCt ) )
+                                      : 0.0;
+                c.poolIndex        = poolIndex;
+                c.spikes           = spikeBatch;   // copy -- spikeBatch is reused next chunk
+
+                analysisFeed_->publish( std::move( c ) );
+            }
         }
 
         fromCt = headCt + static_cast<t_ull>( tpts );
@@ -448,4 +501,13 @@ void ImecFetchThreadCpu::fetchLoop()
                      "sample the server produced (see the summary above).\n";
     }
 
+    // Both queues' shutdown summaries, so a run that silently dropped
+    // detections or fell behind on the slow side says so rather than
+    // leaving it to be inferred. spikeQueue_/analysisFeed_ are owned by
+    // main and outlive this thread, so it is safe to read their counters
+    // here after the loop has stopped producing into them.
+    if( spikeQueue_ )
+        std::cout << spikeQueue_->summary() << "\n";
+    if( analysisFeed_ )
+        std::cout << analysisFeed_->summary() << "\n";
 }

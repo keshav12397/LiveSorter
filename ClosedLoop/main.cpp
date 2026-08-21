@@ -22,6 +22,7 @@
 #include "FilterBank.h"
 #include "Calibration.h"
 #include "ThreadSafeQueue.h"
+#include "SpikeQueue.h"
 #include "Events.h"
 #include "ImecFetchThread.h"
 #include "NiFetchThread.h"
@@ -326,7 +327,7 @@ int main( int argc, char **argv )
                   << " (version " << sglx_getVersion( hIM ) << ")\n";
 
         // ---- Spawn threads -------------------------------------------------------
-        ThreadSafeQueue<SpikeEvent>    spikeQueue;
+        SpikeQueue                     spikeQueue;
         ThreadSafeQueue<SyllableEvent> syllableQueue;
 
         ImecFetchThread imecThread(
@@ -375,6 +376,8 @@ int main( int argc, char **argv )
         imecThread.join();
         niThread.join();
         decisionThread.join();
+
+        std::cout << spikeQueue.summary() << "\n";
 
         // Close/destroy sequentially, same rule as connect.
         sglx_close( hIM );

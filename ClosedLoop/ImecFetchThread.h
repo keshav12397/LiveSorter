@@ -10,6 +10,7 @@
 #include "ConvolutionEngine.h"
 #include "SyncEdgeTracker.h"
 #include "ThreadSafeQueue.h"
+#include "SpikeQueue.h"
 #include "Events.h"
 
 // Owns exactly one SpikeGLX handle (hIM) -- per the concurrency rules in
@@ -37,7 +38,7 @@ public:
                       const std::string &carChannelMapJsonPath,
                       bool applyHighpass, double highpassCutoffHz,
                       int imecSyncBit, int fetchChunkMs,
-                      ThreadSafeQueue<SpikeEvent> &spikeQueue,
+                      SpikeQueue &spikeQueue,
                       const std::string &spikeTimesPath );
 
     void start();
@@ -54,7 +55,7 @@ private:
     double  highpassCutoffHz_;
     int     imecSyncBit_;
     int     fetchChunkMs_;
-    ThreadSafeQueue<SpikeEvent> &spikeQueue_;
+    SpikeQueue &spikeQueue_;
     std::string spikeTimesPath_;
 
     std::atomic<bool> stopFlag_;

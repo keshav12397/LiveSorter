@@ -45,6 +45,10 @@
 #include "Config.h"
 #include "Events.h"
 #include "ThreadSafeQueue.h"
+#include "SpikeQueue.h"
+#include "AnalysisFeed.h"
+#include "AnalysisThread.h"
+#include "SglxMetaReader.h"
 #include "MultiFilterBank.h"
 #include "ImecFetchThreadCpu.h"
 #include "NiFetchThread.h"
@@ -214,8 +218,26 @@ int main( int argc, char **argv )
         }
 
         // ---- Threads ----------------------------------------------------------
-        ThreadSafeQueue<SpikeEvent>    spikeQueue;
+        // spikeQueue is the HOT queue (SpikeQueue.h): detections only, target
+        // < 10 ms, bounded/preallocated, drop-oldest on overflow (see
+        // SpikeQueue.h for the reasoning and bench_queues.cpp/
+        // bench_hotpath.cpp for the measurement backing that choice).
+        SpikeQueue                     spikeQueue;
         ThreadSafeQueue<SyllableEvent> syllableQueue;
+
+        // analysisFeed is the SLOW queue (AnalysisFeed.h): bulk preprocessed
+        // samples for drift estimation and plotting, budget > 500 ms, drops
+        // freely and shares no mutex with spikeQueue above. Sized the same
+        // way ImecFetchThreadCpu::fetchLoop sizes its own per-chunk buffer
+        // (fetchChunkMs of samples at the IMEC rate), so every chunk the
+        // fetch thread produces fits in one pool buffer whole.
+        int fetchChunkMs = cfg.getInt( "fetchChunkMs", 5 );
+        int maxChunkSamplesForFeed = static_cast<int>(
+            fetchChunkMs / 1000.0 * imecRate + 0.5 ) + 1; // matches the fetch loop's slack
+        int nCarChansForFeed = static_cast<int>( loadChanMapJson( carChannelMapJson ).size() );
+        AnalysisFeed analysisFeed( maxChunkSamplesForFeed, nCarChansForFeed,
+                                    cfg.getInt( "analysisFeedBuffers", 8 ) );
+        AnalysisThread analysisThread( analysisFeed );
 
         ImecFetchThreadCpu::SyllableFromSy syFromSy;
         if( useImecSy ) {
@@ -240,17 +262,17 @@ int main( int argc, char **argv )
             hIM, filterBank,
             carChannelMapJson, applyHighpass, highpassCutoffHz,
             cfg.getInt( "imecSyncBit", 6 ),
-            cfg.getInt( "fetchChunkMs", 5 ),
+            fetchChunkMs,
             cfg.requireString( "spikeTimesPath" ),
             cfg.getString( "latencyLogPath", "" ),
-            &spikeQueue, pub, syFromSy );
+            &spikeQueue, pub, syFromSy, &analysisFeed );
 
         NiFetchThread niThread(
             hNI,
             cfg.getInt( "niSyncBit", 0 ),
             cfg.getIntList( "niSyllableLines" ),
             cfg.getInt( "niDebounceSamples", 10 ),
-            cfg.getInt( "fetchChunkMs", 5 ),
+            fetchChunkMs,
             syllableQueue,
             useImecSy ? std::string( "" ) : cfg.getString( "syllableTimesPath", "" ),
             pub );
@@ -302,6 +324,11 @@ int main( int argc, char **argv )
         else
             std::cout << "Press Ctrl+C to stop.\n";
 
+        // Started before imecThread so the SLOW queue's consumer is ready
+        // the moment the first chunk is published -- otherwise acquire()
+        // would be fine (no consumer needed for that) but the pool would
+        // fill and start dropping before anything ever took a chunk.
+        analysisThread.start();
         imecThread.start();
         if( hNI )
             niThread.start();
@@ -330,6 +357,15 @@ int main( int argc, char **argv )
         if( hNI )
             niThread.join();
         decisionThread.join();
+
+        // Only after imecThread has joined (no more chunks can be
+        // published) so analysisThread gets a last chance to drain whatever
+        // is still queued before it stops.
+        analysisThread.stop();
+        analysisThread.join();
+        std::cout << analysisThread.summary() << "\n";
+        std::cout << "AnalysisFeed in flight at shutdown: " << analysisFeed.nInFlight()
+                   << " (should be 0 -- nonzero means a buffer leaked)\n";
 
         publisher.stop();
         std::cout << publisher.summary();

@@ -8,6 +8,8 @@
 
 #include "MultiFilterBank.h"
 #include "ThreadSafeQueue.h"
+#include "SpikeQueue.h"
+#include "AnalysisFeed.h"
 #include "Events.h"
 
 class EventPublisher;
@@ -89,15 +91,25 @@ public:
     // fetch loop -- the queue is a bounded-cost mutex push, and
     // EventPublisher::publish() is a memcpy into a fixed ring that drops
     // rather than waits (see EventPublisher.h for why that matters here).
+    //
+    // spikeQueue is the HOT queue (SpikeQueue.h): detections only, pushed
+    // batched once per chunk. analysisFeed is the SLOW queue
+    // (AnalysisFeed.h), optional and independent of spikeQueue -- a chunk is
+    // handed to it whether or not it carried any detections, since drift
+    // estimation needs the sample data regardless. Neither queue shares a
+    // mutex with the other, and a stalled analysis consumer cannot slow this
+    // thread: acquire() either returns a buffer or nullptr immediately, and
+    // nullptr just means this chunk is skipped on the slow side.
     ImecFetchThreadCpu( void *hSglx, const MultiFilterBank &filterBank,
                          const std::string &carChannelMapJsonPath,
                          bool applyHighpass, double highpassCutoffHz,
                          int imecSyncBit, int fetchChunkMs,
                          const std::string &spikeTimesPath,
                          const std::string &latencyLogPath = "",
-                         ThreadSafeQueue<SpikeEvent> *spikeQueue = 0,
+                         SpikeQueue *spikeQueue = 0,
                          EventPublisher *publisher = 0,
-                         const SyllableFromSy &syllableFromSy = SyllableFromSy() );
+                         const SyllableFromSy &syllableFromSy = SyllableFromSy(),
+                         AnalysisFeed *analysisFeed = 0 );
 
     void start();
     void stop();  // signals the loop to exit; does not join
@@ -123,9 +135,10 @@ private:
     std::string      spikeTimesPath_;
     std::string      latencyLogPath_;
 
-    ThreadSafeQueue<SpikeEvent> *spikeQueue_;
-    EventPublisher              *publisher_;
-    SyllableFromSy               syllableFromSy_;
+    SpikeQueue     *spikeQueue_;
+    EventPublisher *publisher_;
+    SyllableFromSy  syllableFromSy_;
+    AnalysisFeed   *analysisFeed_;
 
     std::atomic<bool> stopFlag_;
     std::thread        thread_;

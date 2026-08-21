@@ -16,7 +16,7 @@ namespace {
 }
 
 
-DecisionThread::DecisionThread( void *hSglx, ThreadSafeQueue<SpikeEvent> &spikeQueue,
+DecisionThread::DecisionThread( void *hSglx, SpikeQueue &spikeQueue,
                                  ThreadSafeQueue<SyllableEvent> &syllableQueue,
                                  double windowStartS, double windowEndS, int spikeCountThreshold,
                                  const std::string &doLine, int doPulseMs,
@@ -93,12 +93,17 @@ void DecisionThread::runLoop()
         while( syllableQueue_.tryPop( syl ) )
             onSyllableEvent( syl );
 
-        SpikeEvent spk;
-        bool anySpike = false;
-        while( spikeQueue_.tryPop( spk ) ) {
-            onSpikeEvent( spk );
-            anySpike = true;
-        }
+        // Drain the HOT queue completely, one lock acquisition rather than
+        // one per spike (SpikeQueue::drain()'s own comment explains why:
+        // this loop used to take at most one spike per pass and cap near
+        // 1000 events/s, well under the ~1500/s the all-units pipeline
+        // produces). drain() itself is capped at kMaxDrain, so loop until it
+        // reports empty rather than assuming one call suffices.
+        spikeDrainBuf_.clear();
+        bool anySpike = spikeQueue_.drain( spikeDrainBuf_ ) > 0;
+        while( spikeQueue_.drain( spikeDrainBuf_ ) > 0 ) {}
+        for( size_t i = 0; i < spikeDrainBuf_.size(); ++i )
+            onSpikeEvent( spikeDrainBuf_[i] );
 
         pruneExpired();
         lowerLineIfDue();
@@ -106,8 +111,11 @@ void DecisionThread::runLoop()
         // Only block when there was genuinely nothing to do, so an idle
         // loop still yields the CPU and still checks stopFlag_ promptly.
         if( !anySpike && syllableQueue_.empty() ) {
-            if( spikeQueue_.waitPop( spk, 1 ) )
-                onSpikeEvent( spk );
+            spikeDrainBuf_.clear();
+            if( spikeQueue_.waitDrain( spikeDrainBuf_, 1 ) > 0 ) {
+                for( size_t i = 0; i < spikeDrainBuf_.size(); ++i )
+                    onSpikeEvent( spikeDrainBuf_[i] );
+            }
         }
 
         // Backlog is the symptom that the bug above produced silently for
