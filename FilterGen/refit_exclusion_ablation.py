@@ -81,7 +81,26 @@ _worker = {}
 #     peruser        vs peruser_capped  ->  what the shorter window costs
 #     peruser_capped vs shared_all      ->  what the shared exclusion costs
 # and only the second of those is the question this script exists to answer.
-VARIANTS = ["peruser", "peruser_capped", "shared_all", "shared_none"]
+# Both shared_* arms are gone, for two different reasons.
+#
+# shared_all (exclude every sorted spike) is impossible on dense data: the
+# 900 s train half is 99.5% spike-present, leaving 1869 usable samples. The
+# script now measures that and drops the arm at runtime.
+#
+# shared_none (exclude nothing) is computable but pointless: it puts every
+# spike's energy into R, and R is exactly what LCMV minimises output variance
+# against, so spike energy in R is what the estimate exists to exclude. Not a
+# design anyone would ship, so its f1 answers nothing.
+#
+# The probe-wide sharing idea behind both is documented in this repo as
+# already tried and rejected -- see ClosedLoop/NoiseCovariance.h:11-14 and
+# generate_filter.py's single-target fit. Cheap refitting comes from scanning
+# a BAND of channels per unit under that unit's own exclusion mask, not from
+# sharing one array across units; test_noise_cov_banded.py pins that.
+#
+# What remains is the question the rolling-window online design needs: how
+# much f1 does a SHORTER covariance window cost?
+VARIANTS = ["peruser", "peruser_capped"]
 
 SUMMARY_FIELDS = ["unit_id", "variant", "n_channels", "sel_channels",
                    "threshold", "recall", "precision", "f1", "fp_rate_hz",
@@ -333,73 +352,93 @@ def main():
     # oversubscribed where the true union coverage is 99.5%.
     MIN_COV_SAMPLES = 50 * L      # ~10 samples per dimension of a 5-channel R
 
-    present = np.zeros(data_train.shape[0], dtype=bool)
-    for t in spike_t_train_all:
-        lo = max(0, int(t) - off)
-        hi = min(data_train.shape[0], int(t) + L - 1 + off)
-        present[lo:hi] = True
+    need_shared = ("shared_all" in VARIANTS) or ("shared_none" in VARIANTS)
 
-    def usable_samples(n_end):
-        """Total samples in gaps >= 2L within present[:n_end]."""
-        sub = present[:n_end]
-        dd = np.diff(sub.astype(np.int8))
-        st_ = np.where(dd == -1)[0] + 1
-        en_ = np.where(dd == 1)[0] + 1
-        if not sub[0]:
-            st_ = np.r_[0, st_]
-        if not sub[-1]:
-            en_ = np.r_[en_, n_end]
-        k = min(len(st_), len(en_))
-        gl = en_[:k] - st_[:k]
-        return int(gl[gl >= 2 * L].sum())
-
-    cand_s = args.cov_t_max
-    cov_max_samples = None
-    while True:
-        cand_samples = min(data_train.shape[0], int(cand_s * fs))
-        got = usable_samples(cand_samples)
-        print(f"shared_all feasibility at {cand_samples / fs:.0f}s: "
-              f"{got} usable samples (need {MIN_COV_SAMPLES})")
-        if got >= MIN_COV_SAMPLES:
-            cov_max_samples = cand_samples
-            break
-        if cand_samples >= data_train.shape[0]:
-            break
-        cand_s *= 2
-
-    if cov_max_samples is None:
-        # Not a script limitation -- a property of the recording, and the
-        # first real finding of this ablation. Excluding every sorted unit
-        # from a dense recording leaves no data to estimate from, so a cached
-        # noise covariance cannot use that exclusion set at all. Only
-        # "exclude nothing" (or a small fixed subset) remains, which
-        # retroactively explains why fit_lcmv excludes just the target and
-        # its interferers -- ~6 of 160 units, where gaps still exist.
-        print(f"  -> {100.0 * present.mean():.2f}% of the train half is "
-              f"spike-present; even the full {data_train.shape[0] / fs:.0f}s "
-              f"yields only {usable_samples(data_train.shape[0])} usable "
-              f"samples.")
-        print("  -> DROPPING the 'shared_all' arm. Any difference against it "
-              "would measure data starvation, not exclusion policy.")
-        cov_by_lag_all = None
-        VARIANTS[:] = [v for v in VARIANTS if v != "shared_all"]
+    if not need_shared:
+        # No arm needs a probe-wide array, so neither the feasibility scan
+        # nor either build runs. The window still has to be pinned because
+        # peruser_capped uses it.
         cov_max_samples = min(data_train.shape[0], int(args.cov_t_max * fs))
+        cov_by_lag_all = cov_by_lag_none = None
+        print(f"No shared arm requested; peruser_capped window = "
+              f"{cov_max_samples / fs:.0f}s.")
     else:
-        print(f"Building shared cov_by_lag over the FULL channel group "
-              f"(first {cov_max_samples / fs:.1f}s of train), "
-              f"excluding ALL sorted spikes (variant 'shared_all')...")
-        t0 = time.time()
-        cov_by_lag_all = gf.noise_cov_by_lag(
-            data_train, np.sort(spike_t_train_all), L, off, cov_max_samples)
-        print(f"  done ({time.time() - t0:.1f}s), shape {cov_by_lag_all.shape}")
+        present = np.zeros(data_train.shape[0], dtype=bool)
+        for t in spike_t_train_all:
+            lo = max(0, int(t) - off)
+            hi = min(data_train.shape[0], int(t) + L - 1 + off)
+            present[lo:hi] = True
 
-    print(f"Building shared cov_by_lag over the FULL channel group "
-          f"(first {cov_max_samples / fs:.1f}s of train, same window as "
-          f"shared_all), excluding NOTHING (variant 'shared_none')...")
-    t0 = time.time()
-    cov_by_lag_none = gf.noise_cov_by_lag(
-        data_train, np.array([], dtype=np.int64), L, off, cov_max_samples)
-    print(f"  done ({time.time() - t0:.1f}s)")
+        def usable_samples(n_end):
+            """Total samples in gaps >= 2L within present[:n_end]."""
+            sub = present[:n_end]
+            dd = np.diff(sub.astype(np.int8))
+            st_ = np.where(dd == -1)[0] + 1
+            en_ = np.where(dd == 1)[0] + 1
+            if not sub[0]:
+                st_ = np.r_[0, st_]
+            if not sub[-1]:
+                en_ = np.r_[en_, n_end]
+            k = min(len(st_), len(en_))
+            gl = en_[:k] - st_[:k]
+            return int(gl[gl >= 2 * L].sum())
+
+        cand_s = args.cov_t_max
+        cov_max_samples = None
+        while True:
+            cand_samples = min(data_train.shape[0], int(cand_s * fs))
+            got = usable_samples(cand_samples)
+            print(f"shared_all feasibility at {cand_samples / fs:.0f}s: "
+                  f"{got} usable samples (need {MIN_COV_SAMPLES})")
+            if got >= MIN_COV_SAMPLES:
+                cov_max_samples = cand_samples
+                break
+            if cand_samples >= data_train.shape[0]:
+                break
+            cand_s *= 2
+
+        if cov_max_samples is None:
+            # Not a script limitation -- a property of the recording, and the
+            # first real finding of this ablation. Excluding every sorted unit
+            # from a dense recording leaves no data to estimate from, so a cached
+            # noise covariance cannot use that exclusion set at all. Only
+            # "exclude nothing" (or a small fixed subset) remains, which
+            # retroactively explains why fit_lcmv excludes just the target and
+            # its interferers -- ~6 of 160 units, where gaps still exist.
+            print(f"  -> {100.0 * present.mean():.2f}% of the train half is "
+                  f"spike-present; even the full {data_train.shape[0] / fs:.0f}s "
+                  f"yields only {usable_samples(data_train.shape[0])} usable "
+                  f"samples.")
+            print("  -> DROPPING the 'shared_all' arm. Any difference against it "
+                  "would measure data starvation, not exclusion policy.")
+            cov_by_lag_all = None
+            VARIANTS[:] = [v for v in VARIANTS if v != "shared_all"]
+            cov_max_samples = min(data_train.shape[0], int(args.cov_t_max * fs))
+        else:
+            print(f"Building shared cov_by_lag over the FULL channel group "
+                  f"(first {cov_max_samples / fs:.1f}s of train), "
+                  f"excluding ALL sorted spikes (variant 'shared_all')...")
+            t0 = time.time()
+            cov_by_lag_all = gf.noise_cov_by_lag(
+                data_train, np.sort(spike_t_train_all), L, off, cov_max_samples)
+            print(f"  done ({time.time() - t0:.1f}s), shape {cov_by_lag_all.shape}")
+
+        # Only built if some variant needs it. With nothing excluded the window
+        # is ONE segment of ~1.8M samples, and noise_cov_by_lag's einsum over
+        # 121 lags x 96 x 96 channels behaves far worse on a single huge segment
+        # than on the many short ones it was benchmarked against -- a 60 s
+        # window did not finish in an hour. Skipping it when unused is the
+        # difference between this script taking minutes and taking hours.
+        if "shared_none" in VARIANTS:
+            print(f"Building shared cov_by_lag over the FULL channel group "
+                  f"(first {cov_max_samples / fs:.1f}s of train), "
+                  f"excluding NOTHING (variant 'shared_none')...")
+            t0 = time.time()
+            cov_by_lag_none = gf.noise_cov_by_lag(
+                data_train, np.array([], dtype=np.int64), L, off, cov_max_samples)
+            print(f"  done ({time.time() - t0:.1f}s)")
+        else:
+            cov_by_lag_none = None
 
     data_path, data_dtype, data_shape = data.filename, data.dtype, data.shape
     del data, data_train
