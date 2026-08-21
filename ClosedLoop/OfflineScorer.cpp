@@ -48,10 +48,9 @@ std::vector<UnitPeaks> scoreAllUnitsOffline(
         unitIds, unitChannelsInCarGroup, unitFilters, thresholds, N, templateLength );
 
     Preprocessor preprocessor( nCarCh, highpassCutoffHz, meta.sampleRateHz, applyHighpass, /*applyCar=*/true );
-    // detectionCapacity is gone with the GPU. It existed because the device
-    // wrote detections into a fixed-size buffer, so an offline scoring pass
-    // with all--infinity thresholds -- which reports EVERY NMS-accepted peak
-    // -- could silently overflow it and drop detections. A std::vector has no
+    // There is no detectionCapacity. An offline scoring pass with
+    // all--infinity thresholds reports EVERY NMS-accepted peak, which a
+    // fixed-size buffer could silently overflow. A std::vector has no
     // such cap, so that failure mode does not exist here.
     (void)detectionCapacity;
     MultiConvolutionEngine engine( filterBank, nCarCh, minSeparationSamples );
@@ -120,8 +119,6 @@ std::vector<UnitPeaks> scoreAllUnitsOffline(
         result[u].score.push_back( flushed[p].score );
     }
 
-    // No release(): MultiFilterBank owns no device memory, so the whole
-    // two-owners-racing-to-free class of bug the GPU version guarded against
-    // does not exist.
+    // No release(): MultiFilterBank owns nothing that needs freeing.
     return result;
 }

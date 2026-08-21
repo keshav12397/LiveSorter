@@ -5,7 +5,7 @@ calibrate_all_units.py
 Batch version of calibrate_for_closedloop.py: fits an LCMV filter and sweeps
 a detection threshold for EVERY Kilosort unit in a session (not just one
 hand-picked target), and packs the results into the flat, fixed-stride binary
-format ClosedLoop's GPU pipeline (GpuFilterBank) loads directly -- no
+format ClosedLoop's GPU pipeline (MultiFilterBank) loads directly -- no
 per-unit channels_/filter_/threshold_<id>.bin files, since 500 units x 3
 tiny files each is an awkward on-disk shape for a single batched GPU upload.
 

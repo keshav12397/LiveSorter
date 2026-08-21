@@ -16,12 +16,12 @@
 //   2. CHUNKING INVARIANCE. The same sample stream cut into different chunk
 //      patterns -- including chunks SHORTER than templateLength-1, and
 //      ragged sizes that change every call -- must give the same peaks.
-//      This is the regime test_gpu_chunking_equivalence.cu existed for: the
+//      This is the regime chunk-boundary equivalence testing exists for: the
 //      live fetch loop consumes whatever SpikeGLX has buffered rather than
 //      waiting for a full chunk, so on a real 3-minute run 31% of 84,111
 //      chunks were under 60 samples and 1,059 were a single sample. That is
-//      exactly where the GPU version's overlap-save carry-forward used to
-//      copy a device range onto an overlapping one.
+//      exactly where an overlap-save carry-forward is most likely to copy a
+//      range onto an overlapping one.
 //
 //   3. THREAD-COUNT INVARIANCE. 1 worker and 8 workers must produce the
 //      identical vector, not merely the same set. Without the sort in

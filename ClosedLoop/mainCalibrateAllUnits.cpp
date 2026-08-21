@@ -1,21 +1,14 @@
 // =================================
-// mainCalibrateAllUnits: C++/GPU batch calibration driver -- Phase 5 of the
-// all_units branch plan. Ties together, for every qualifying Kilosort unit
-// in one run:
-//   Phase 1 (KilosortReader/SglxMetaReader)     -- ground truth + meta
-//   OfflinePreprocessor                          -- .bin -> scratch (once)
-//   Phase 3's cheap per-unit prep (LcmvFit.cpp)  -- mean waveform, channel
-//                                                    selection, interferer
-//                                                    pick (CPU, per unit)
-//   Phase 2 (NoiseCovariance.cu)                 -- batched GPU covariance,
-//                                                    ONE kernel launch for
-//                                                    every unit
-//   Phase 3's LCMV solve (LcmvFit.cpp)           -- per unit, CPU
-//   Phase 4 (OfflineScorer.cu)                   -- batched GPU threshold-
-//                                                    sweep scoring, ONE
-//                                                    streaming pass for
-//                                                    every unit
-//   ThresholdSweep.cpp                            -- per-unit best-F1 pick
+// mainCalibrateAllUnits: C++ batch calibration driver. Ties together, for
+// every qualifying Kilosort unit in one run:
+//   KilosortReader/SglxMetaReader  -- ground truth + meta
+//   OfflinePreprocessor            -- .bin -> scratch (once)
+//   LcmvFit.cpp                    -- mean waveform, channel selection,
+//                                     interferer pick, then the LCMV solve
+//   NoiseCovariance.cpp            -- per-unit space-time covariance
+//   OfflineScorer.cpp              -- threshold-sweep scoring, ONE
+//                                     streaming pass for every unit
+//   ThresholdSweep.cpp             -- per-unit best-F1 pick
 //
 // Mirrors FilterGen/calibrate_all_units.py's candidate selection, fit
 // sequence, and output format exactly (see that file's docstring) -- this
@@ -162,7 +155,7 @@ int main( int argc, char **argv )
         int    scoreChunkSamples      = cfg.getInt( "scoreChunkSamples", 2000 );
         int    detectionCapacityCfg   = cfg.getInt( "detectionCapacity", 0 );
 
-        // ---- Phase 1: ground truth + meta -----------------------------------
+        // ---- Ground truth + meta ---------------------------------------------
         std::cout << "Loading Kilosort ground truth from " << ksDir << "...\n";
         KilosortData ks = KilosortData::load( ksDir );
         std::cout << "  " << ks.spikeTimes.size() << " spikes\n";
@@ -243,7 +236,7 @@ int main( int argc, char **argv )
         // waveform, channel selection -- must run BEFORE the batched
         // covariance kernel, since that kernel needs each unit's already-
         // selected channels + target/interferer spike mask as input (see
-        // NoiseCovariance.h / the branch plan's Phase 2 reordering).
+        // NoiseCovariance.h's note on per-unit exclusion).
         struct PrepResult {
             bool ok;
             std::string failReason;
@@ -338,9 +331,9 @@ int main( int argc, char **argv )
         std::cout << "  " << nPrepOk << "/" << candidates.size() << " units prepped successfully.\n";
         lap( "per-unit prep" );
 
-        // ---- Phase 2: batched noise covariance across every prepped unit
+        // ---- Batched noise covariance across every prepped unit
         // (see NoiseCovariance.h). Reads the scratch memmap in place -- the
-        // GPU version had to copy the whole train split to the device first,
+        // The whole train split is memory-mapped rather than copied,
         // which for a 30-minute session was several GB and put a hard ceiling
         // on session length that no longer exists.
 
@@ -382,7 +375,7 @@ int main( int argc, char **argv )
             unitChannelsFlat, segmentsFlat, segmentOffsets, segmentCounts, nCovUnits );
         lap( "batched noise covariance" );
 
-        // ---- Phase 3 (LCMV solve): per unit, CPU -----------------------------
+        // ---- LCMV solve: per unit -------------------------------------------
         std::cout << "Solving LCMV filter for each unit...\n";
         std::vector<FitResult> fits;
         std::vector<std::string> fitFailReason( prep.size() );
@@ -422,7 +415,7 @@ int main( int argc, char **argv )
         std::cout << "  " << fits.size() << "/" << candidates.size() << " units fit successfully.\n";
         lap( "LCMV solve" );
 
-        // ---- Phase 4: batched GPU threshold-sweep scoring, ONE streaming
+        // ---- Threshold-sweep scoring, ONE streaming
         // pass over the held-out test split for every fit unit at once.
         std::vector<UnitPeaks> allPeaks;
         if( !fits.empty() ) {

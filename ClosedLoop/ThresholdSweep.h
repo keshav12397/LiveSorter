@@ -6,10 +6,9 @@
 // Same threshold-sweep logic Calibration.cpp already runs for the single-
 // target CPU path (percentile-based threshold range, hits/misses/fp counts
 // via sorted binary search, best-F1 selection) -- lifted into a standalone,
-// per-unit-callable module for the batch GPU calibration path (see the
-// branch plan's Phase 4) instead of duplicated inline, and instead of
-// touching Calibration.cpp itself (which stays exactly as validated for the
-// single-target path).
+// per-unit-callable module for the batch calibration path, instead of
+// duplicated inline and instead of touching Calibration.cpp itself (which
+// stays exactly as validated for the single-target path).
 //
 // Mirrors FilterGen/threshold_sweep_real.py's sweep_thresholds() (total_fp
 // only -- this doesn't track per-interferer FP breakdown, since the batch

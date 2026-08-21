@@ -7,7 +7,7 @@
 namespace {
 
 // Same "read whole file, verify exact expected element count" pattern
-// GpuFilterBank.cu and FilterBank.cpp each use. Kept local for the same
+// FilterBank.cpp uses. Kept local for the same
 // reason they kept theirs local: it is ~15 lines, and the alternative is a
 // shared template header that all three must agree on forever.
 template<typename T>

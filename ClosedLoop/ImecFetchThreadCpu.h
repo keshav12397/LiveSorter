@@ -81,11 +81,8 @@ public:
     // summarizes this against fetchChunkMs to check the pipeline is keeping
     // up with real time.
     //
-    // The GPU version's "ignore chunk 0, it measures ~200 ms" caveat went
-    // away with the GPU: that cost was the first launch of each kernel
-    // loading its module and reserving its local-memory backing store.
-    // There is no module to load, so chunk 0 is an ordinary chunk and every
-    // row of this log now means the same thing.
+    // Chunk 0 is an ordinary chunk: every row of this log means the same
+    // thing, with no warm-up row to discard.
     //
     // spikeQueue / publisher: both optional (nullptr). Neither can block the
     // fetch loop -- the queue is a bounded-cost mutex push, and
@@ -121,11 +118,9 @@ private:
     void            *hSglx_;
     // BY VALUE, not by reference. fetchLoop() translates every unit's raw
     // SpikeGLX channel ids into positions within the CAR group and stores
-    // the result back into the bank. The GPU version did the same through a
-    // const reference, which compiled only because d_channels was a pointer
-    // and the pointee was not const -- it mutated the caller's bank as a
-    // side effect of starting the thread. Owning a copy makes that explicit
-    // and leaves the caller's bank alone.
+    // the result back into the bank. Owning a copy keeps that mutation
+    // local: taking a reference here would rewrite the caller's bank as a
+    // side effect of starting the thread.
     MultiFilterBank  filterBank_;
     std::string      carChannelMapJsonPath_;
     bool             applyHighpass_;

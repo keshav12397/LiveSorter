@@ -93,12 +93,12 @@ Honest caveats
 Output (in --out-dir, per mode)
 -------------------------------
     unit_ids.bin / channels.bin / filters.bin / thresholds.bin
-        Exactly the format GpuFilterBank::load() already reads, holding each
+        Exactly the format MultiFilterBank::load() already reads, holding each
         unit's *first* segment -- so an unmodified ClosedLoopAllUnits.exe
         loads this directory and runs correctly from t=0.
     drift_schedule.bin / drift_schedule.json
         The remaining segments as timed swap events, for
-        GpuFilterBank::updateFilters(). Absent or empty when no unit drifts.
+        MultiFilterBank::updateFilters(). Absent or empty when no unit drifts.
     summary.csv
         One row per attempted unit, with the baseline's columns plus
         n_segments, drift_span_um and the segment boundary times.
@@ -679,7 +679,7 @@ def _fit_one_unit_chrono(target_id, spike_count, mode):
 # --------------------------------------------------------------------- #
 
 def write_outputs(out_dir, candidates, results, template_length, n_channels, fs):
-    """Write the four flat files GpuFilterBank::load() already reads (each
+    """Write the four flat files MultiFilterBank::load() already reads (each
     unit's first segment) plus the schedule of later segments.
 
     Splitting it this way is deliberate: an unmodified ClosedLoopAllUnits.exe

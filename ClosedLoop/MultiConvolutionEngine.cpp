@@ -131,10 +131,9 @@ void MultiConvolutionEngine::runUnit( int u )
 
     const float thr = bank_.thresholds[static_cast<size_t>( u )];
     for( size_t i = 0; i < peaks.size(); ++i ) {
-        // >= not >, matching the GPU nmsDecideKernel's comparison, so a
-        // threshold sweep's chosen value keeps the same meaning. An
-        // all--infinity threshold array therefore reports every
-        // NMS-accepted peak, which is what offline scoring relies on.
+        // >= not >, so a threshold sweep's chosen value keeps its meaning:
+        // an all--infinity threshold array reports every NMS-accepted peak,
+        // which is what offline scoring relies on.
         if( peaks[i].score >= static_cast<double>( thr ) ) {
             MultiPeakEvent ev;
             ev.unitIndex   = u;
@@ -297,9 +296,8 @@ void MultiConvolutionEngine::updateUnit( int unitIndex, const std::vector<int32_
     // with. ConvolutionEngine has no setTaps(), and adding one would mean
     // touching the file this port exists to leave alone -- so the engine is
     // reconstructed in place instead. That does reset its history, which is
-    // the one behavioural difference from the GPU path's in-place
-    // cudaMemcpy, and it is bounded: the unit loses its (templateLength-1)
-    // samples of context, ~2 ms at 30 kHz, once per swap event. A swap
+    // bounded: the unit loses its (templateLength-1) samples of context,
+    // ~2 ms at 30 kHz, once per swap event. A swap
     // changes which channels the unit reads anyway, so the old history was
     // the wrong data to carry across regardless.
     const int nc = bank_.nChannelsPerUnit;

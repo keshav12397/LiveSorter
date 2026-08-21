@@ -26,8 +26,8 @@
 // generate_filter.filter_output() carries an explicit comment saying the
 // dtype must follow the input so that "a threshold picked against
 // silently-upcast float64 scores" is not "calibrated for a distribution the
-// [online] path never actually produces". The GPU kernel this replaced was
-// float32 throughout. ConvolutionEngine is float64 because it serves the
+// [online] path never actually produces".
+// ConvolutionEngine is float64 because it serves the
 // SINGLE-TARGET path, whose Python side writes float64 filters and
 // thresholds -- a separate, internally consistent convention.
 //

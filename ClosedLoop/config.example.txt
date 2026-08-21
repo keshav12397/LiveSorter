@@ -96,8 +96,8 @@ syllableTimesPath=D:/test_newsorter/syllableTimes.txt
 decisionLogPath=D:/test_newsorter/decisions.log
 
 # ==========================================================================
-# ClosedLoopAllUnits.exe (all-units GPU detection) -- see README.md's
-# "All-units GPU detection" section. That executable reads a SUBSET of the
+# ClosedLoopAllUnits.exe (all-units detection) -- see README.md's
+# "All-units detection" section. That executable reads a SUBSET of the
 # keys above plus the three below; everything in the Calibration, NI, and
 # Decision sections is ignored by it (it is detection-only).
 #
@@ -118,10 +118,9 @@ decisionLogPath=D:/test_newsorter/decisions.log
 # misinterprets the byte layout rather than failing.
 filterNChannels=5
 
-# Optional per-chunk GPU timing log: chunk_index,n_samples,latency_ms.
-# Leave blank to disable. IGNORE CHUNK 0 -- it reads ~200ms against ~0.2ms
-# for every chunk after it, because the first launch of each kernel loads
-# its module and reserves its local memory. Not a stall; the server ring
+# Optional per-chunk timing log: chunk_index,n_samples,latency_ms.
+# Leave blank to disable. Every row means the same thing -- there is no
+# warm-up chunk to discard. The server ring
 # absorbs it. Any OTHER chunk over a millisecond is worth looking at.
 latencyLogPath=D:/test_newsorter/latency_all_units.csv
 

@@ -75,10 +75,8 @@ namespace {
 // index-convention derivation this mirrors exactly, not re-derived here):
 // for lag d, cross[i,k] = sum_t seg[t,i] * (seg[t-d,k] if 0<=t-d<L else 0).
 //
-// The GPU version computed each segment's per-channel means on thread 0 and
-// broadcast them through shared memory, since the mean does not depend on
-// lag. Here they are computed ONCE for all lags before the parallel loop --
-// same saving, and no synchronisation at all.
+// Per-channel means do not depend on lag, so they are computed ONCE for all
+// lags before the parallel loop rather than per lag inside it.
 void noiseCovarianceForLag(
     const float *data, long long dataStride /* nChannelsGroup */,
     int templateLength, int N,
@@ -96,10 +94,10 @@ void noiseCovarianceForLag(
         const double *mean = segMeans + static_cast<size_t>( s ) * N;
 
         // t ranges only over positions whose lagged partner is also inside the
-        // segment. The GPU version tested `tk < 0 || tk >= L` inside the loop
-        // and skipped; clamping the bounds instead is the same set of terms
-        // (the skipped ones contribute the zero-padding Python's padded window
-        // also contributes) without the per-sample branch.
+        // segment. Clamping the bounds is the same set of terms as testing
+        // `tk < 0 || tk >= L` per sample and skipping (the skipped ones
+        // contribute the zero-padding Python's padded window also
+        // contributes), without the per-sample branch.
         const int tLo = ( lag > 0 ) ? lag : 0;
         const int tHi = ( lag > 0 ) ? L : L + lag;
 

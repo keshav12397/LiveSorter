@@ -134,7 +134,7 @@ int main( int argc, char **argv )
 
     struct Case { int units; int chans; };
     std::vector<Case> cases = {
-        { 157, 5 },    // what the GPU build actually ran
+        { 157, 5 },    // the size a real session has run at
         { 250, 6 },
         { 500, 6 },
         { 1000, 6 },   // the question

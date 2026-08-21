@@ -2,7 +2,7 @@
 // real unit's already-fit filter, scored via the real
 // generate_filter.filter_output + threshold_sweep_real.find_all_peaks over
 // the held-out test split), runs the same range through
-// scoreAllUnitsOffline() (GPU, all -infinity threshold), and checks the
+// scoreAllUnitsOffline() (all -infinity threshold), and checks the
 // resulting peak list matches within a small index/score tolerance. Run:
 //
 //   python FilterGen/gen_offline_scorer_fixture.py --out fixture.bin ...
@@ -81,15 +81,15 @@ int main( int argc, char **argv )
     const UnitPeaks &got = result[0];
     std::printf( "engine produced %zu peaks\n", got.sampleIdx.size() );
 
-    // Build a sorted (sampleIdx -> score) map for the GPU output, match each
-    // expected Python peak to the nearest GPU peak within a small window.
+    // Build a sorted (sampleIdx -> score) map for the C++ output, match each
+    // expected Python peak to the nearest C++ peak within a small window.
     std::vector<std::pair<long long, double> > gotSorted;
     for( size_t i = 0; i < got.sampleIdx.size(); ++i )
         gotSorted.push_back( std::make_pair( got.sampleIdx[i], got.score[i] ) );
     std::sort( gotSorted.begin(), gotSorted.end() );
 
     const long long tolIdx = 2;
-    const double tolScoreRel = 0.05; // float32 GPU vs float32 CPU, different reduction order
+    const double tolScoreRel = 0.05; // float32 vs float64, different reduction order
     int matched = 0;
     double maxScoreErr = 0.0;
 

@@ -1,7 +1,7 @@
 // Reads the fixture FilterGen/gen_noise_covariance_fixture.py generates (a
 // real preprocessed recording + one real target/interferer noise-covariance
 // estimate from generate_filter.noise_covariance_vectorized), runs the same
-// computation through the batched GPU kernel (NoiseCovariance.cu), and
+// computation through NoiseCovariance.cpp, and
 // checks the resulting R matrix matches within tolerance. Run:
 //
 //   python FilterGen/gen_noise_covariance_fixture.py --out-meta ... --out-scratch ...

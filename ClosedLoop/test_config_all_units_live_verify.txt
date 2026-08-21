@@ -11,7 +11,7 @@
 #
 # Run live once SpikeGLX came back up (it went down mid-session earlier --
 # see the previous commit). Two 30 s runs, both against the real
-# ImecFetchThreadGPU/sglx_fetch path this time, not OfflineReplay:
+# ImecFetchThreadCpu/sglx_fetch path this time, not OfflineReplay:
 #
 #   run 1 (no viewer): span 900175 samples (30.0058 s), processed 900175,
 #     dropped 0 in 0 gaps, fetch errors 0, max backlog 62 samples (2.07 ms).

@@ -12,22 +12,19 @@
 //   filters.bin     float32[nUnits * templateLength * nChannelsPerUnit]  row-major per unit
 //   thresholds.bin  float32[nUnits]
 //
-// This is the CPU replacement for GpuFilterBank, and it deliberately keeps
-// that struct's exact field names, semantics and call contract so the port
-// is a substitution rather than a redesign -- the on-disk format, the
+// Two conventions here are load-bearing and easy to get wrong:
 // "channels are raw SpikeGLX ids until the fetch thread translates them"
-// convention, and updateFilters()'s meaning are all unchanged.
+// (ImecFetchThreadCpu does the translation and writes it back), and
+// updateFilters()'s meaning for a drift swap -- see MultiConvolutionEngine's
+// note on the history reset that follows one.
 //
 // Fixed nChannelsPerUnit/templateLength across every unit (see
 // calibrate_all_units.py's --n-channels/--template-length), which is what
 // lets every consumer index with a flat stride instead of a variable-length
 // per-unit lookup.
 //
-// One real difference from the GPU version, and it is a simplification
-// rather than a compromise: there is no device memory, so this type is
-// ordinarily copyable, needs no release(), and cannot leak. The GPU version
-// had to be move-only to stop two owners racing to cudaFree the same
-// pointers; that whole class of failure is gone.
+// This type owns only its own vectors, so it is ordinarily copyable, needs
+// no release(), and cannot leak.
 //
 // filters are stored as float32, which is both the packed file layout and
 // the precision calibrate_all_units.py picks thresholds in -- see
@@ -62,13 +59,12 @@ struct MultiFilterBank {
     // Builds a bank directly from in-memory arrays instead of the packed
     // files -- for the batch calibration path, where the bank is being
     // CONSTRUCTED rather than loaded. `channels` must already be translated
-    // to indices within the CAR/preprocessed group (caller's
-    // responsibility, matching the GPU version's convention).
+    // to indices within the CAR/preprocessed group -- the caller's
+    // responsibility.
     //
     // Pass all -infinity thresholds to make every NMS-accepted peak get
-    // reported unconditionally, which is what offline scoring wants. On the
-    // GPU that trick existed to avoid writing a second kernel variant; here
-    // it is simply how the threshold comparison is expressed, since
+    // reported unconditionally, which is what offline scoring wants: it
+    // falls out of how the threshold comparison is expressed, since
     // ConvolutionEngine reports candidates and the caller thresholds them.
     static MultiFilterBank fromHostArrays( const std::vector<int> &unitIds,
                                            const std::vector<int32_t> &channels,

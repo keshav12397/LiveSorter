@@ -20,7 +20,7 @@ target-unit id corresponds to, by searching kilosort units near the
 method's peak channel and scoring which one's spike train actually lines up
 in time (findCandidateKsUnits / identifyGroundTruthUnit). Here that search
 isn't needed: ImecFetchThreadGPU's detections CSV already carries the true
-Kilosort cluster id for every detection (GpuFilterBank::hostUnitIds), since
+Kilosort cluster id for every detection (MultiFilterBank::hostUnitIds), since
 calibrate_all_units.py fit each unit's filter directly against that same
 cluster id in the first place. So this script goes straight from
 detections CSV unit_id -> ground truth spike train, for every unit at once,

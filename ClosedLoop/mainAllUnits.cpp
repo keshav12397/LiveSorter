@@ -1,18 +1,19 @@
 // =================================
-// ClosedLoopAllUnits: all-Kilosort-units, GPU-accelerated spike detection
-// driving the same syllable-triggered digital output ClosedLoop.exe drives.
+// ClosedLoopAllUnits: all-Kilosort-units spike detection driving the same
+// syllable-triggered digital output ClosedLoop.exe drives. Runs on CPU;
+// FastMatchedFilter.h carries the AVX2 hot loop and the arithmetic showing
+// why a GPU was never needed for this.
 // See README.md's "All-units detection" section.
 //
 // Deliberately a SEPARATE executable from ClosedLoop.exe (main.cpp), not a
 // mode switch inside it -- the single-target path is the validated
 // production pipeline and stays untouched by work here.
 //
-// It was detection-only for its first phase (MultiFilterBank + one
-// ImecFetchThreadCpu, spikes to a CSV and nowhere else). It now runs the
-// full loop: ImecFetchThreadCpu + NiFetchThread + DecisionThread, the latter
-// two reused as-is from main.cpp, plus an EventPublisher feeding
-// SpikeViewer.exe. Still no Python calibration subprocess -- filters come
-// from FilterGen/calibrate_all_units.py, run offline ahead of time.
+// The full loop: ImecFetchThreadCpu + NiFetchThread + DecisionThread, the
+// latter two reused as-is from main.cpp, plus an EventPublisher feeding
+// SpikeViewer.exe and an AnalysisThread feeding its drift tracker. No
+// Python calibration subprocess -- filters come from
+// FilterGen/calibrate_all_units.py, run offline ahead of time.
 //
 // Two things here that main.cpp does not have, both config-driven:
 //

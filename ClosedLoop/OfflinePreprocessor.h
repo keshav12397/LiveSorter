@@ -7,7 +7,7 @@
 // Streams a raw SpikeGLX .bin file through Preprocessor (causal highpass
 // + CAR, byte-identical code path to the live detection pipeline -- reusing
 // it here removes the causal/acausal drift risk by construction, see the
-// branch plan) and writes the result to a float32 scratch file on disk,
+// and writes the result to a float32 scratch file on disk,
 // shape (nSamples, carChannelIds.size()) row-major/C order -- same
 // on-disk convention as FilterGen/threshold_sweep_real.py's
 // load_and_prepare(..., order='C') scratch memmap, so downstream code

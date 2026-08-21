@@ -49,8 +49,7 @@ struct MultiPeakEvent {
 //
 // What this class actually adds is therefore only three things:
 //   1. the channel gather -- slicing each unit's nChannelsPerUnit columns
-//      out of the full CAR-group chunk (what the GPU kernel did into shared
-//      memory),
+//      out of the full CAR-group chunk,
 //   2. the threshold comparison, and
 //   3. thread-pool scheduling across units.
 //
@@ -129,8 +128,7 @@ public:
     // Routing every swap through here is what stops the two copies drifting
     // apart -- see MultiFilterBank::updateFilters()'s note.
     //
-    // This DOES reset that one unit's history, unlike the GPU path's
-    // in-place cudaMemcpy over the taps. ConvolutionEngine has no
+    // This DOES reset that one unit's history. ConvolutionEngine has no
     // setTaps(), and adding one means editing the file this port exists to
     // leave untouched, so the engine is reconstructed instead. The cost is
     // bounded and one-off per event: that unit loses templateLength-1
@@ -185,10 +183,9 @@ private:
 
     // Per-unit scratch for the channel gather, allocated once. Each is
     // nChannelsPerUnit * maxSamplesSeen_ doubles and grows on demand rather
-    // than being sized from a declared maximum -- unlike the GPU version,
-    // which had to preallocate every device buffer at construction from
-    // maxChunkSamples, there is no penalty here for a chunk that turns out
-    // larger than expected, and so no cap to get wrong.
+    // than being sized from a declared maximum. Growing on demand means a
+    // chunk larger than expected costs one reallocation rather than being
+    // truncated, so there is no cap to get wrong.
     std::vector<std::vector<double>> gather_;
 
     // Per-unit output, so workers never contend on a shared vector. Merged

@@ -26,7 +26,7 @@
 // It is not the live path and must never be mistaken for a test of it. There
 // is no sglx_fetch, no ring buffer, no sample accounting, and no wall-clock
 // pressure on a fetch loop -- all four of those are exactly what a live run
-// tests and this cannot. Detection here is a single batched GPU pass over the
+// tests and this cannot. Detection here is a single batched pass over the
 // whole file, not a chunked real-time one.
 //
 // Pacing. DecisionThread's pruneExpired() closes a trial on WALL-CLOCK time,
@@ -126,7 +126,7 @@ int main( int argc, char **argv )
 
         // ---- filter bank ------------------------------------------------------
         // Loaded through MultiFilterBank so the packed-file reader is not
-        // written a second time. The GPU version then had to copy all three
+        // written a second time. An implementation that copied all three
         // arrays back off the device; they are already host vectors here.
         std::vector<int32_t> rawChannels;
         std::vector<float>   filters, thresholds;

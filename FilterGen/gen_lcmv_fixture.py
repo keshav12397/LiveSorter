@@ -9,7 +9,7 @@ the same call, and the expected output -- validates lcmvFilter()'s assembly
 logic (building C, ridge-regularizing R, solving for weights) against
 Python bit for bit, decoupled from mean_waveform/select_channels (which get
 their own validation via a real end-to-end run) and from the noise-
-covariance estimate itself (Phase 2, GPU-batched, not yet built -- R here is
+covariance estimate itself (NoiseCovariance.cpp -- R here is
 a synthetic stand-in with realistic SPD structure).
 
 Binary layout (float64, C order), written to --out:

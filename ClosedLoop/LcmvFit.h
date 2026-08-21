@@ -9,7 +9,7 @@
 #include "ScratchMemmap.h"
 
 // C++ port of FilterGen/generate_filter.py's fit-side functions (NOT the
-// noise-covariance estimation -- see NoiseCovariance.h/.cu for that, GPU-
+// noise-covariance estimation -- see NoiseCovariance.h for that, CPU-
 // batched across units). Each function here mirrors one Python function of
 // the same name/purpose; see that module's docstrings for the underlying
 // rationale, not re-derived here.

@@ -13,7 +13,7 @@
 #endif
 
 // Read-only memory-mapped view of the float32 scratch file
-// OfflinePreprocessor.cu writes -- (nSamples, nChannels) row-major/C order.
+// OfflinePreprocessor writes -- (nSamples, nChannels) row-major/C order.
 // Backed by the OS page cache (Windows CreateFileMapping/MapViewOfFile), not
 // a RAM-resident copy -- matters for the same reason
 // FilterGen/threshold_sweep_real.py's scratch memmap does this instead of

@@ -12,9 +12,9 @@ the preprocessed scratch file itself (persisted at a fixed path -- Python's
 own copy is normally deleted at exit), selected channel indices, target+
 interferer spike times (train split only), and the expected R.
 
-Isolates NoiseCovariance.cu's kernel from channel selection (LcmvFit.cpp,
+Isolates NoiseCovariance.cpp from channel selection (LcmvFit.cpp,
 already validated separately) and from the offline GPU preprocessing driver
-(OfflinePreprocessor.cu) -- this fixture supplies known-good channels/data
+(OfflinePreprocessor.cpp) -- this fixture supplies known-good channels/data
 directly, matching the "isolate one function per phase" pattern already
 used for gen_lcmv_fixture.py.
 """

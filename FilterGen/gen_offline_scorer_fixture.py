@@ -12,7 +12,7 @@ peak list: the filter taps/channels, the CAR channel group (raw ids, for
 translating channels into CAR-group indices the same way
 ImecFetchThreadGPU::fetchLoop() does), and the expected peak list.
 
-Isolates OfflineScorer.cu (streaming raw .bin -> GpuPreprocessor ->
+Isolates OfflineScorer.cpp (streaming raw .bin -> Preprocessor ->
 GpuConvolutionEngine with an all -infinity threshold) from the fit step
 (already validated separately: LcmvFit, NoiseCovariance) -- this fixture
 supplies an already-fit real filter directly.

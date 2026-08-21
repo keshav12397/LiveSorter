@@ -103,8 +103,8 @@ private:
     std::atomic<long long> nPublished_, nDropped_;
 
     // uintptr_t rather than SOCKET so this header stays free of winsock2.h.
-    // The original reason was that it is included from what was then an nvcc
-    // translation unit; nvcc is gone, but the reason to keep it is not.
+    // Keeps <windows.h> out of this header's includers, which is worth
+    // doing on its own: it drags in min/max macros that break std::min.
     // winsock2.h drags in windows.h, whose min/max macros break any header
     // using std::min/std::max after it, and it must precede any windows.h
     // that would otherwise pull in winsock 1 -- an include-order constraint
