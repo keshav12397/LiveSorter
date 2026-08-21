@@ -68,7 +68,20 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 _worker = {}
 
-VARIANTS = ["peruser", "shared_all", "shared_none"]
+# peruser_capped is the control that makes the comparison mean anything.
+#
+# `peruser` rescans the WHOLE train half (it only needs 5 channels, so it can
+# afford to). The shared variants are built over all 96 channels and are
+# therefore capped at --cov-t-max seconds, ~30x less data. Without a third
+# arm holding data constant, "shared is worse" would be unattributable
+# between the exclusion set and the sample count.
+#
+# peruser_capped keeps per-unit exclusion and takes the SAME window as the
+# shared arms. So:
+#     peruser        vs peruser_capped  ->  what the shorter window costs
+#     peruser_capped vs shared_all      ->  what the shared exclusion costs
+# and only the second of those is the question this script exists to answer.
+VARIANTS = ["peruser", "peruser_capped", "shared_all", "shared_none"]
 
 SUMMARY_FIELDS = ["unit_id", "variant", "n_channels", "sel_channels",
                    "threshold", "recall", "precision", "f1", "fp_rate_hz",
@@ -87,7 +100,8 @@ def _init_worker(tmp_path, dtype, shape, np_ch, positions, labels,
 
 def _fit_and_score(data_train, data_test, spike_t_train, spike_cl_train,
                     np_ch, target_id, interferer_ids, a, rng, cov_by_lag,
-                    split_t, n_samples, spike_t_all, spike_cl_all):
+                    split_t, n_samples, spike_t_all, spike_cl_all,
+                    cov_max_samples=None):
     """One fit_lcmv call (R source = cov_by_lag, or a per-unit rescan if
     None) plus scoring against the untouched test half. Mirrors
     calibrate_drift_aware.py's _fit_filter_on_window/_evaluate_on_test, with
@@ -101,7 +115,8 @@ def _fit_and_score(data_train, data_test, spike_t_train, spike_cl_train,
         data_train, spike_t_train, spike_cl_train, np_ch, target_id,
         interferer_ids, a["n_channels"], a["template_length"],
         a["template_offset"], a["ridge"], a["max_spikes"], rng,
-        extras=extras, cov_by_lag=cov_by_lag)
+        extras=extras, cov_by_lag=cov_by_lag,
+        cov_max_samples=cov_max_samples)
     if len(sel_channels) != a["n_channels"]:
         raise ValueError(f"only {len(sel_channels)} channels available, "
                           f"need {a['n_channels']}")
@@ -175,8 +190,10 @@ def _fit_one_unit(target_id, spike_count):
             row["unit_id"], row["variant"] = target_id, variant
             row["status"] = "failed"
             try:
-                cov_by_lag = {"peruser": None, "shared_all": cov_by_lag_all,
+                cov_by_lag = {"peruser": None, "peruser_capped": None,
+                              "shared_all": cov_by_lag_all,
                               "shared_none": cov_by_lag_none}[variant]
+                cov_cap = a["cov_max_samples"] if variant == "peruser_capped" else None
                 # Same seed every variant -- mean_waveform's rng.choice
                 # subsample (target + interferers) is then bit-identical
                 # across variants, so `sel` cannot differ for any reason
@@ -186,7 +203,8 @@ def _fit_one_unit(target_id, spike_count):
                     scored = _fit_and_score(
                         data_train, data_test, spike_t_train, spike_cl_train,
                         np_ch, target_id, interferer_ids, a, rng_fit,
-                        cov_by_lag, split_t, n_samples, spike_t, spike_cl)
+                        cov_by_lag, split_t, n_samples, spike_t, spike_cl,
+                        cov_max_samples=cov_cap)
                 row.update({
                     "n_channels": a["n_channels"],
                     "sel_channels": " ".join(str(c) for c in scored["sel_channels"]),
@@ -236,6 +254,24 @@ def main():
     ap.add_argument("--min-spikes", type=int, default=200)
     ap.add_argument("--max-units", type=int, default=0)
     ap.add_argument("--workers", type=int, default=0)
+    ap.add_argument("--cov-t-max", type=float, default=60.0,
+                     help="Seconds of the train half to scan when building "
+                          "the two SHARED cov_by_lag arrays (shared_all, "
+                          "shared_none). Matches generate_filter.py's own "
+                          "--t-max default for noise-covariance estimation. "
+                          "Necessary for 'shared_none': with no spikes "
+                          "excluded, the whole train half is ONE spike-free "
+                          "segment, and noise_cov_by_lag's cost is "
+                          "O(nlags * n_ch^2 * segment_length) over the FULL "
+                          "channel group (not just a handful of selected "
+                          "channels, unlike the per-unit baseline) -- "
+                          "unbounded this is impractical (a 900s window at "
+                          "96 channels does not finish in reasonable time). "
+                          "'shared_all' does not strictly need the cap (its "
+                          "spike-free gaps are already short with many "
+                          "clusters excluded) but is capped identically for "
+                          "an apples-to-apples comparison between the two "
+                          "shared variants.")
     ap.add_argument("--scratch-dir")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--seed", type=int, default=0)
@@ -274,19 +310,22 @@ def main():
     data_train = data[:split_t]
     spike_t_train_all = spike_t[spike_t < split_t]
 
-    print("Building shared cov_by_lag over the FULL channel group, "
-          "excluding ALL sorted spikes (variant 'shared_all')...")
+    cov_max_samples = min(data_train.shape[0], int(args.cov_t_max * fs))
+    print(f"Building shared cov_by_lag over the FULL channel group "
+          f"(first {cov_max_samples / fs:.1f}s of train), "
+          f"excluding ALL sorted spikes (variant 'shared_all')...")
     t0 = time.time()
     cov_by_lag_all = gf.noise_cov_by_lag(
-        data_train, np.sort(spike_t_train_all), L, off, data_train.shape[0])
+        data_train, np.sort(spike_t_train_all), L, off, cov_max_samples)
     print(f"  done ({time.time() - t0:.1f}s), shape {cov_by_lag_all.shape}, "
           f"{cov_by_lag_all.nbytes / 1e6:.1f} MB")
 
-    print("Building shared cov_by_lag over the FULL channel group, "
-          "excluding NOTHING (variant 'shared_none')...")
+    print(f"Building shared cov_by_lag over the FULL channel group "
+          f"(first {cov_max_samples / fs:.1f}s of train), "
+          f"excluding NOTHING (variant 'shared_none')...")
     t0 = time.time()
     cov_by_lag_none = gf.noise_cov_by_lag(
-        data_train, np.array([], dtype=np.int64), L, off, data_train.shape[0])
+        data_train, np.array([], dtype=np.int64), L, off, cov_max_samples)
     print(f"  done ({time.time() - t0:.1f}s)")
 
     data_path, data_dtype, data_shape = data.filename, data.dtype, data.shape
@@ -299,7 +338,8 @@ def main():
                       template_offset=args.template_offset,
                       n_channels=args.n_channels, ridge=args.ridge,
                       max_spikes=args.max_spikes, n_thresholds=args.n_thresholds,
-                      fs=fs, seed=args.seed, split_t=split_t)
+                      fs=fs, seed=args.seed, split_t=split_t,
+                      cov_max_samples=cov_max_samples)
     init_args = (data_path, data_dtype, data_shape, np_ch, positions, labels,
                  spike_t, spike_cl, unit_args, cov_by_lag_all, cov_by_lag_none)
 
