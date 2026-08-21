@@ -19,6 +19,7 @@
 #include "SglxCppClient.h"
 
 #include "Config.h"
+#include "RunProcess.h"
 #include "FilterBank.h"
 #include "Calibration.h"
 #include "ThreadSafeQueue.h"
@@ -95,34 +96,6 @@ std::string resolveRelativeToExe( const std::string &path )
 // cmd.exe entirely and uses Windows' own (more predictable) argv-splitting
 // rules for lpCommandLine, which is also the standard recommended fix for
 // this well-known system() quoting gotcha.
-#ifdef _WIN32
-int runProcessAndWait( const std::string &commandLine )
-{
-    STARTUPINFOA si;
-    ZeroMemory( &si, sizeof(si) );
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi;
-    ZeroMemory( &pi, sizeof(pi) );
-
-    // CreateProcessA requires a writable buffer for lpCommandLine (it may
-    // modify it in place).
-    std::vector<char> buf( commandLine.begin(), commandLine.end() );
-    buf.push_back( '\0' );
-
-    BOOL ok = CreateProcessA(
-        NULL, buf.data(), NULL, NULL, /*bInheritHandles=*/TRUE,
-        0, NULL, NULL, &si, &pi );
-    if( !ok )
-        return -1;
-
-    WaitForSingleObject( pi.hProcess, INFINITE );
-    DWORD exitCode = 1;
-    GetExitCodeProcess( pi.hProcess, &exitCode );
-    CloseHandle( pi.hProcess );
-    CloseHandle( pi.hThread );
-    return static_cast<int>( exitCode );
-}
-#endif
 
 // Shells out to FilterGen/calibrate_for_closedloop.py, which fits the LCMV
 // filter on a training split, sweeps the detection threshold against the
@@ -190,11 +163,7 @@ void runPythonCalibration( const Config &cfg, int targetId, const std::string &f
 
     std::cout << "Running: " << cmd.str() << "\n";
 
-#ifdef _WIN32
     int rc = runProcessAndWait( cmd.str() );
-#else
-    int rc = std::system( cmd.str().c_str() );
-#endif
     if( rc != 0 )
         throw std::runtime_error(
             "'" + script + "' exited with code " + std::to_string( rc ) );

@@ -17,12 +17,34 @@ sglxHost=localhost
 sglxPort=4142
 
 # ---- Filter bank ---------------------------------------------------------
-# Written by FilterGen/calibrate_all_units.py (or calibrate_drift_aware.py,
-# which additionally writes drift_schedule.bin into the same directory --
-# picked up automatically when present, ignored when absent).
+# filterDir is an OUTPUT when calibrating (below) and an INPUT when
+# skipCalibration=true. calibrate_drift_aware.py additionally writes
+# drift_schedule.bin here; it is picked up automatically when present and
+# ignored when absent.
 filterDir=D:/your_session/filters
 templateLength=61
 filterNChannels=5
+
+# ---- Calibration ---------------------------------------------------------
+# You do NOT need a pre-built bank. Name the Kilosort output and the .bin it
+# was sorted from and the bank is fitted before the run connects.
+#
+# trainingBinPath must be the EXACT file Kilosort ran on -- calibration
+# matches ground-truth spike times to raw-file offsets by sample index, and
+# a mismatch produces meaningless thresholds silently rather than failing.
+trainingKsDir=D:/your_session/ks_out
+trainingBinPath=D:/your_session/rec_g0_t0.imec0.ap.bin
+pythonExe=C:/Users/you/anaconda3/python.exe
+
+# Reuse the existing bank in filterDir instead of refitting. Use this for a
+# second run against the same session, and whenever the bank came from
+# calibrate_drift_aware.py (which also writes drift_schedule.bin).
+skipCalibration=false
+
+# 0 = every qualifying unit. Lower it for a quick smoke test.
+calibrationMaxUnits=0
+calibrationWorkers=0
+autoInterferers=5
 
 # CAR MUST be computed over the exact channel group the filters were fit
 # against. This has to be the same file calibrate_all_units.py's

@@ -30,6 +30,45 @@ what a live run tests and it cannot.
 
 ---
 
+## Calibration
+
+**You do not need a pre-built filter bank.** Point a config at a Kilosort
+directory and the `.bin` it was sorted from, and `ClosedLoopAllUnits` fits
+the bank itself before connecting:
+
+```
+filterDir=D:/out/filters          # an OUTPUT: where the fitted bank is written
+trainingKsDir=D:/session/ks_out
+trainingBinPath=D:/session/rec_g0_t0.imec0.ap.bin
+pythonExe=C:/path/to/python.exe
+```
+
+`trainingBinPath` must be the **exact** file Kilosort was run on.
+Calibration matches ground-truth spike times to raw-file offsets by sample
+index, so any mismatch silently produces meaningless thresholds rather than
+an error.
+
+Set `skipCalibration=true` to reuse whatever is already in `filterDir` —
+which is what you want for a second run against the same session, and what
+the drift-aware path needs, since `calibrate_drift_aware.py` also writes
+`drift_schedule.bin` and `calibrate_all_units.py` does not. Calibration is
+skipped by default only when no `trainingKsDir` is given.
+
+The fit itself is `FilterGen/calibrate_all_units.py`, shelled out to via
+`RunProcess.h`. **The Python is the single implementation** of "fit a
+filter" and "score a threshold"; `CalibrateAllUnits.exe` is a C++ port of
+the same control flow for machines without Python, and this repo has twice
+lost recall to a second implementation of shared math drifting out of sync.
+The single-target `ClosedLoop.exe` has always worked this way
+(`calibrate_for_closedloop.py`); the all-units path now matches it.
+
+Tuning keys — `autoInterferers`, `calibrationTrainFrac`,
+`calibrationMaxUnits`, `calibrationWorkers`, `calibrationMinSpikes`,
+`calibrationSeed` — all map to that script's own flags; see
+`config.example.txt`.
+
+---
+
 ## Live architecture
 
 Four threads, each owning exactly one SpikeGLX handle.

@@ -96,14 +96,33 @@ syllableTimesPath=D:/test_newsorter/syllableTimes.txt
 decisionLogPath=D:/test_newsorter/decisions.log
 
 # ==========================================================================
-# ClosedLoopAllUnits.exe (all-units detection) -- see README.md's
-# "All-units detection" section. That executable reads a SUBSET of the
-# keys above plus the three below; everything in the Calibration, NI, and
-# Decision sections is ignored by it (it is detection-only).
+# ClosedLoopAllUnits.exe (all-units detection) -- the production path.
+# See README.md.
 #
-# Keys it does read from above: sglxHost, sglxPort, filterDir,
-# templateLength, carChannelMapJson, applyHighpass, highpassCutoffHz,
-# imecSyncBit, fetchChunkMs, spikeTimesPath.
+# It is NOT detection-only, and it does NOT ignore the sections above.
+# It runs the full loop -- calibration, fetch, decision, digital out --
+# and reads most of the same keys:
+#
+#   Calibration: skipCalibration, trainingKsDir, trainingBinPath,
+#     trainingMetaPath, pythonExe, calibrationScript, autoInterferers,
+#     calibrationTrainFrac, calibrationRidge, calibrationMaxSpikes,
+#     calibrationNThresholds, calibrationMinSpikes, calibrationMaxUnits,
+#     calibrationWorkers, calibrationSeed, templateOffset.
+#     calibrationScript defaults to FilterGen/calibrate_all_units.py here,
+#     not calibrate_for_closedloop.py. There is no calibrationBackend=cpp
+#     equivalent: CalibrateAllUnits.exe is a separate binary.
+#   Fetch:    sglxHost, sglxPort, filterDir, templateLength,
+#             filterNChannels, carChannelMapJson, applyHighpass,
+#             highpassCutoffHz, imecSyncBit, fetchChunkMs, spikeTimesPath,
+#             latencyLogPath.
+#   NI:       niSyncBit, niSyllableLines, niDebounceSamples,
+#             syllableTimesPath -- when syllableSource=ni (the default).
+#   Decision: decisionUnitIds, windowStartMs, windowEndMs,
+#             spikeCountThreshold, doLine, doPulseMs, decisionLogPath,
+#             decisionCsvPath.
+#
+# `interferers` (an explicit list) is single-target only; the all-units
+# path always auto-picks per unit, via autoInterferers.
 #
 # NOTE filterDir means something different here: not the single-target
 # channels_/filter_/threshold_<id>.bin trio, but the four flat packed files

@@ -36,6 +36,7 @@
 #include <thread>
 #include <chrono>
 #include <stdexcept>
+#include <sstream>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -44,6 +45,7 @@
 #include "SglxCppClient.h"
 
 #include "Config.h"
+#include "RunProcess.h"
 #include "Events.h"
 #include "ThreadSafeQueue.h"
 #include "SpikeQueue.h"
@@ -128,6 +130,65 @@ void bitsToField( const std::vector<int> &bits, const char *keyName,
     }
 }
 
+// Shells out to FilterGen/calibrate_all_units.py, which fits an LCMV filter
+// for every qualifying Kilosort unit on a training split, sweeps each
+// unit's threshold against the held-out remainder, and writes the four flat
+// files MultiFilterBank::load() reads.
+//
+// Same arrangement the single-target path has always used (main.cpp's
+// runPythonCalibration): the Python is the ONE implementation of "fit a
+// filter" and "score a threshold". CalibrateAllUnits.exe is a C++ port of
+// the same control flow for machines with no Python; preferring the script
+// here is deliberate, and this repo has twice paid for a second
+// implementation of shared math drifting out of sync.
+void runPythonCalibrationAllUnits( const Config &cfg, const std::string &filterDir )
+{
+    std::string pythonExe = cfg.getString( "pythonExe", "python" );
+    std::string script    = resolveRelativeToExe(
+        cfg.getString( "calibrationScript", "FilterGen/calibrate_all_units.py" ) );
+
+    std::ostringstream cmd;
+    cmd << "\"" << pythonExe << "\""
+        // -u: unbuffered. Python fully buffers (not line-buffers) when not
+        // attached to a real console -- our case, through inherited
+        // handles -- so a calibration that takes minutes would print
+        // nothing until it finished.
+        << " -u"
+        << " \"" << script << "\""
+        << " --ks-dir \""   << cfg.requireString( "trainingKsDir" )   << "\""
+        << " --bin-path \"" << cfg.requireString( "trainingBinPath" ) << "\"";
+
+    std::string metaPath = cfg.getString( "trainingMetaPath", "" );
+    if( !metaPath.empty() )
+        cmd << " --meta-path \"" << metaPath << "\"";
+
+    std::string carJson = cfg.getString( "carChannelMapJson", "" );
+    if( !carJson.empty() )
+        cmd << " --channel-map-json \"" << carJson << "\"";
+
+    cmd << " --n-channels "      << cfg.getInt( "filterNChannels", 5 )
+        << " --template-length " << cfg.getInt( "templateLength", 61 )
+        << " --template-offset " << cfg.getInt( "templateOffset", 20 )
+        << " --train-frac "      << cfg.getDouble( "calibrationTrainFrac", 0.5 )
+        << " --ridge "           << cfg.getDouble( "calibrationRidge", 1e-3 )
+        << " --max-spikes "      << cfg.getInt( "calibrationMaxSpikes", 2000 )
+        << " --fc "              << cfg.getDouble( "highpassCutoffHz", 300.0 )
+        << " --n-thresholds "    << cfg.getInt( "calibrationNThresholds", 60 )
+        << " --auto-interferers " << cfg.getInt( "autoInterferers", 5 )
+        << " --min-spikes "      << cfg.getInt( "calibrationMinSpikes", 200 )
+        << " --max-units "       << cfg.getInt( "calibrationMaxUnits", 0 )
+        << " --workers "         << cfg.getInt( "calibrationWorkers", 0 )
+        << " --out-dir \""       << filterDir << "\""
+        << " --seed "            << cfg.getInt( "calibrationSeed", 0 );
+
+    std::cout << "Running: " << cmd.str() << "\n";
+
+    int rc = runProcessAndWait( cmd.str() );
+    if( rc != 0 )
+        throw std::runtime_error(
+            "\'" + script + "\' exited with code " + std::to_string( rc ) );
+}
+
 } // namespace
 
 
@@ -146,6 +207,41 @@ int main( int argc, char **argv )
         std::string filterDir      = resolveRelativeToExe( cfg.requireString( "filterDir" ) );
         int         nChannelsPerUnit = cfg.getInt( "filterNChannels", 5 );
         int         templateLength   = cfg.getInt( "templateLength", 61 );
+
+        // Calibration. Default is to FIT the bank from a Kilosort directory
+        // plus the training .bin it was sorted from, the same way the
+        // single-target path always has -- so a config need only name the
+        // recording, not a pre-built filter directory.
+        //
+        // skipCalibration=true reuses whatever is already in filterDir,
+        // which is what you want for a second run against the same session,
+        // and what the drift-aware path wants (calibrate_drift_aware.py
+        // writes drift_schedule.bin too, which calibrate_all_units.py does
+        // not).
+        //
+        // The default is false ONLY when the config supplies what fitting
+        // needs; a config that names neither a training recording nor an
+        // existing bank should say so plainly rather than fail deeper in.
+        bool skipCalibration = cfg.getBool( "skipCalibration",
+                                             !cfg.getString( "trainingKsDir", "" ).empty()
+                                              ? false : true );
+
+        if( !skipCalibration ) {
+            if( cfg.getString( "trainingKsDir", "" ).empty() ||
+                cfg.getString( "trainingBinPath", "" ).empty() ) {
+                throw std::runtime_error(
+                    "Config: calibration needs 'trainingKsDir' and "
+                    "'trainingBinPath' (the Kilosort output directory and the "
+                    "EXACT .bin it was sorted from). Set skipCalibration=true "
+                    "to use a pre-built bank in filterDir instead." );
+            }
+            std::cout << "Calibrating all units into " << filterDir << " ...\n";
+            runPythonCalibrationAllUnits( cfg, filterDir );
+        }
+        else {
+            std::cout << "skipCalibration=true -- using the existing bank in "
+                       << filterDir << "\n";
+        }
 
         std::cout << "Loading multi-unit filter bank from " << filterDir << "...\n";
         MultiFilterBank filterBank = MultiFilterBank::load( filterDir, nChannelsPerUnit, templateLength );
