@@ -87,6 +87,24 @@ struct MultiFilterBank {
     void updateFilters( int unitIndex, const std::vector<int32_t> &channels,
                         const std::vector<float> &filter, float threshold );
 
+    // Position of raw SpikeGLX channel `rawId` within `carChannelIds`, or
+    // -1 if it is not part of the CAR group.
+    static int carGroupIndexOf( const std::vector<int> &carChannelIds, int32_t rawId );
+
+    // Rewrites `channels` in place from raw SpikeGLX ids to positions within
+    // the CAR group. THE SINGLE IMPLEMENTATION of that mapping -- every
+    // consumer that reads sample data by channel needs a bank in this form,
+    // and a bank that skipped it indexes preprocessed samples with raw probe
+    // ids. That failure is silent: a raw id is usually still a plausible
+    // index, and one that is out of range looks identical to a genuinely bad
+    // channel, which callers correctly skip.
+    //
+    // Returns false and fills *badUnit/*badChannel if some channel is not in
+    // the group. Idempotence is NOT claimed -- calling this twice translates
+    // twice. Translate once, immediately after load().
+    bool translateChannelsToCarGroup( const std::vector<int> &carChannelIds,
+                                       int *badUnit = 0, int32_t *badChannel = 0 );
+
     // Pointer to unit `u`'s taps, [templateLength * nChannelsPerUnit].
     const float *unitFilter( int u ) const
     { return filters.data() + static_cast<size_t>( u ) * templateLength * nChannelsPerUnit; }

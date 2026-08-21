@@ -33,12 +33,14 @@ ImecFetchThreadCpu::ImecFetchThreadCpu( void *hSglx, const MultiFilterBank &filt
                                          SpikeQueue *spikeQueue,
                                          EventPublisher *publisher,
                                          const SyllableFromSy &syllableFromSy,
-                                         AnalysisFeed *analysisFeed )
+                                         AnalysisFeed *analysisFeed,
+                                         DriftSchedule *driftSchedule )
     :   hSglx_( hSglx ), filterBank_( filterBank ),
         carChannelMapJsonPath_( carChannelMapJsonPath ),
         applyHighpass_( applyHighpass ), highpassCutoffHz_( highpassCutoffHz ),
         imecSyncBit_( imecSyncBit ), fetchChunkMs_( fetchChunkMs ),
         spikeTimesPath_( spikeTimesPath ), latencyLogPath_( latencyLogPath ),
+        driftSchedule_( driftSchedule ), nSwapsApplied_( 0 ),
         spikeQueue_( spikeQueue ), publisher_( publisher ),
         syllableFromSy_( syllableFromSy ),
         analysisFeed_( analysisFeed ),
@@ -133,19 +135,20 @@ void ImecFetchThreadCpu::fetchLoop()
     // and an untranslated raw SpikeGLX id is usually still a plausible small
     // integer -- so getting the order wrong would silently filter the wrong
     // channels rather than fail.
+    //
+    // A drift swap arrives with raw SpikeGLX ids too, so the SAME mapping has
+    // to run on it. It is a lambda rather than a repeated loop because a
+    // second, independently-written copy of this translation is exactly the
+    // failure this codebase has already paid for twice -- and here it would
+    // be silent, since an untranslated id is usually still a valid index.
     {
-        int N = filterBank_.nChannelsPerUnit;
-        for( size_t i = 0; i < filterBank_.channels.size(); ++i ) {
-            int32_t raw = filterBank_.channels[i];
-            std::vector<int>::const_iterator it =
-                std::find( carChannelIds.begin(), carChannelIds.end(), raw );
-            if( it == carChannelIds.end() ) {
-                std::cerr << "ImecFetchThreadCpu: unit at index " << (i / N)
-                          << " uses channel " << raw
-                          << " which is not part of the CAR channel group\n";
-                return;
-            }
-            filterBank_.channels[i] = static_cast<int32_t>( it - carChannelIds.begin() );
+        int     badUnit = -1;
+        int32_t badChan = -1;
+        if( !filterBank_.translateChannelsToCarGroup( carChannelIds, &badUnit, &badChan ) ) {
+            std::cerr << "ImecFetchThreadCpu: unit at index " << badUnit
+                      << " uses channel " << badChan
+                      << " which is not part of the CAR channel group\n";
+            return;
         }
     }
 
@@ -307,6 +310,61 @@ void ImecFetchThreadCpu::fetchLoop()
         // silently began us later; this is the only place that fact is
         // observable at all.
         long long gap = acct.noteFetch( static_cast<long long>( headCt ), tpts );
+
+        // ---- Drift-schedule filter swaps --------------------------------
+        // Time is taken from the STREAM clock (samples since the first
+        // successful fetch), not wall clock. A fetch stall or a resync must
+        // not slide the schedule relative to the data it was computed for.
+        //
+        // ASSUMPTION, and it is a real one: the schedule's t_s is "seconds
+        // from the calibration recording's start", and this maps it onto
+        // "seconds since this run's first fetch". That is only right if the
+        // live session begins at the same point in the drift trajectory the
+        // calibration recording did. It is an open-loop plan replayed on a
+        // timer -- the closed-loop version is the live tracker feeding
+        // measured motion back, which is not wired yet.
+        if( driftSchedule_ && !driftSchedule_->events.empty()
+            && acct.firstSampleIndex >= 0 ) {
+
+            double nowS = static_cast<double>(
+                static_cast<long long>( headCt ) - acct.firstSampleIndex ) / sampleRate;
+
+            while( const DriftSchedule::Event *ev = driftSchedule_->next( nowS ) ) {
+                if( ev->unitIndex < 0 || ev->unitIndex >= filterBank_.nUnits ) {
+                    std::cerr << "ImecFetchThreadCpu: drift event at t=" << ev->t_s
+                              << "s names unit index " << ev->unitIndex
+                              << ", out of range for a " << filterBank_.nUnits
+                              << "-unit bank -- skipped\n";
+                    continue;
+                }
+
+                std::vector<int32_t> translated( ev->channels.size() );
+                bool ok = true;
+                for( size_t k = 0; k < ev->channels.size(); ++k ) {
+                    int idx = MultiFilterBank::carGroupIndexOf( carChannelIds,
+                                                                 ev->channels[k] );
+                    if( idx < 0 ) {
+                        std::cerr << "ImecFetchThreadCpu: drift event at t=" << ev->t_s
+                                  << "s for unit index " << ev->unitIndex
+                                  << " uses channel " << ev->channels[k]
+                                  << ", not part of the CAR channel group -- skipped\n";
+                        ok = false;
+                        break;
+                    }
+                    translated[k] = static_cast<int32_t>( idx );
+                }
+                if( !ok )
+                    continue;
+
+                // Through the ENGINE, not the bank. MultiConvolutionEngine
+                // widens the taps to double at construction, so writing the
+                // bank alone would leave the copy that actually scores
+                // untouched -- a swap that silently does nothing.
+                engine.updateUnit( ev->unitIndex, translated, ev->filter,
+                                    ev->threshold );
+                ++nSwapsApplied_;
+            }
+        }
         if( gap > 0 ) {
             std::cerr << "ImecFetchThreadCpu: stream gap of " << gap
                       << " samples before headCt=" << headCt << "\n";
@@ -492,6 +550,23 @@ void ImecFetchThreadCpu::fetchLoop()
     if( syllableTimesFile.is_open() )
         syllableTimesFile.flush();
 
+    if( driftSchedule_ && !driftSchedule_->events.empty() ) {
+        // cursor is how far next() walked, i.e. how many events came DUE.
+        // Anything due but not applied was rejected above and already said
+        // why. Reporting the shortfall as "not yet due" would have hidden a
+        // rejected swap behind a benign-sounding message -- which it did,
+        // on the first live run.
+        const long long nDue     = static_cast<long long>( driftSchedule_->cursor );
+        const long long nTotal   = static_cast<long long>( driftSchedule_->events.size() );
+        const long long nSkipped = nDue - nSwapsApplied_;
+        std::cout << "\nDriftSchedule: " << nSwapsApplied_ << " of " << nTotal
+                   << " swaps applied";
+        if( nSkipped > 0 )
+            std::cout << ", " << nSkipped << " REJECTED (see errors above)";
+        if( nDue < nTotal )
+            std::cout << ", " << ( nTotal - nDue ) << " never came due";
+        std::cout << "\n";
+    }
     std::cout << "\n" << acct.summary( "IMEC", sampleRate );
     if( !acct.balanced() || acct.nDropped > 0 ) {
         std::cerr << "ImecFetchThreadCpu: WARNING -- this run did not process every "

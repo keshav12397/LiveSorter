@@ -1,5 +1,7 @@
 #include "MultiFilterBank.h"
 
+#include <algorithm>
+
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -133,4 +135,32 @@ void MultiFilterBank::updateFilters( int unitIndex, const std::vector<int32_t> &
     std::copy( filter.begin(), filter.end(),
                filters.begin() + static_cast<size_t>( unitIndex ) * templateLength * nChannelsPerUnit );
     thresholds[static_cast<size_t>( unitIndex )] = threshold;
+}
+
+
+int MultiFilterBank::carGroupIndexOf( const std::vector<int> &carChannelIds,
+                                       int32_t rawId )
+{
+    std::vector<int>::const_iterator it =
+        std::find( carChannelIds.begin(), carChannelIds.end(), rawId );
+    if( it == carChannelIds.end() )
+        return -1;
+    return static_cast<int>( it - carChannelIds.begin() );
+}
+
+
+bool MultiFilterBank::translateChannelsToCarGroup(
+    const std::vector<int> &carChannelIds, int *badUnit, int32_t *badChannel )
+{
+    const int N = nChannelsPerUnit;
+    for( size_t i = 0; i < channels.size(); ++i ) {
+        int idx = carGroupIndexOf( carChannelIds, channels[i] );
+        if( idx < 0 ) {
+            if( badUnit )    *badUnit = static_cast<int>( i / ( N > 0 ? N : 1 ) );
+            if( badChannel ) *badChannel = channels[i];
+            return false;
+        }
+        channels[i] = static_cast<int32_t>( idx );
+    }
+    return true;
 }

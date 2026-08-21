@@ -6,15 +6,17 @@
 
 
 std::vector<livewire::WireRecord> extractAmplitudeRecords(
-    const AnalysisFeed::Chunk &chunk,
+    const float *samples, int nSamples, int nChannels,
+    long long firstSampleIndex,
+    const std::vector<SpikeEvent> &spikes,
     const MultiFilterBank &filterBank,
     int templateOffset )
 {
     std::vector<livewire::WireRecord> out;
-    if( chunk.spikes.empty() || chunk.nSamples <= 0 || chunk.nChannels <= 0 )
+    if( !samples || spikes.empty() || nSamples <= 0 || nChannels <= 0 )
         return out;
 
-    out.reserve( chunk.spikes.size() * static_cast<size_t>( filterBank.nChannelsPerUnit ) );
+    out.reserve( spikes.size() * static_cast<size_t>( filterBank.nChannelsPerUnit ) );
 
     // Kilosort cluster id -> filter-bank unit index. Chunks carry "a few
     // dozen" spikes (AnalysisFeed.h) against up to ~157 units, so this map
@@ -24,13 +26,13 @@ std::vector<livewire::WireRecord> extractAmplitudeRecords(
     for( size_t i = 0; i < filterBank.hostUnitIds.size(); ++i )
         unitIndexOf[filterBank.hostUnitIds[i]] = static_cast<int>( i );
 
-    const int nCh    = chunk.nChannels;
-    const int nSamp  = chunk.nSamples;
+    const int nCh    = nChannels;
+    const int nSamp  = nSamples;
     const int nChPer = filterBank.nChannelsPerUnit;
     const int tLen   = filterBank.templateLength;
 
-    for( size_t si = 0; si < chunk.spikes.size(); ++si ) {
-        const SpikeEvent &spk = chunk.spikes[si];
+    for( size_t si = 0; si < spikes.size(); ++si ) {
+        const SpikeEvent &spk = spikes[si];
 
         std::unordered_map<int, int>::const_iterator it = unitIndexOf.find( spk.unitId );
         if( it == unitIndexOf.end() )
@@ -39,12 +41,12 @@ std::vector<livewire::WireRecord> extractAmplitudeRecords(
 
         // Window in chunk-relative sample coordinates.
         long long winStartAbs = spk.sampleIndex - templateOffset;
-        long long relStart64  = winStartAbs - chunk.firstSampleIndex;
+        long long relStart64  = winStartAbs - firstSampleIndex;
         if( relStart64 < 0 )
-            continue;   // window starts before this chunk -- skip, don't stitch
+            continue;   // window starts before the span -- skip, don't stitch
         int relStart = static_cast<int>( relStart64 );
         if( relStart + tLen > nSamp )
-            continue;   // window runs past this chunk's end -- skip, don't stitch
+            continue;   // window runs past the span's end -- skip, don't stitch
 
         const int32_t *chans = filterBank.unitChannels( u );
 
@@ -55,7 +57,7 @@ std::vector<livewire::WireRecord> extractAmplitudeRecords(
 
             float peak = 0.0f;
             for( int t = 0; t < tLen; ++t ) {
-                float v = chunk.samples[ static_cast<size_t>( relStart + t ) * nCh + ch ];
+                float v = samples[ static_cast<size_t>( relStart + t ) * nCh + ch ];
                 float av = std::fabs( v );
                 if( av > peak )
                     peak = av;
@@ -72,4 +74,15 @@ std::vector<livewire::WireRecord> extractAmplitudeRecords(
     }
 
     return out;
+}
+
+
+std::vector<livewire::WireRecord> extractAmplitudeRecords(
+    const AnalysisFeed::Chunk &chunk,
+    const MultiFilterBank &filterBank,
+    int templateOffset )
+{
+    return extractAmplitudeRecords(
+        chunk.samples, chunk.nSamples, chunk.nChannels, chunk.firstSampleIndex,
+        chunk.spikes, filterBank, templateOffset );
 }

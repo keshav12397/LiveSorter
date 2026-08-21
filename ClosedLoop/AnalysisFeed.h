@@ -137,6 +137,12 @@ public:
         free_.push_back( poolIndex );
     }
 
+    // The buffer size every chunk is sized against. A consumer that
+    // needs to retain history across chunks must size from THIS, not
+    // from the first chunk it happens to see -- the first chunk of a
+    // run is routinely a short partial one.
+    int samplesPerBuffer() const { return samplesPerBuffer_; }
+
     int nInFlight() const
     {
         std::lock_guard<std::mutex> lock( mutex_ );

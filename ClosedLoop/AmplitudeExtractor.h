@@ -43,13 +43,39 @@
 // Viewer/DriftTracker.h), which is the intended division of labour: this
 // function stays a single pass per (spike, channel) with no state.
 //
-// A spike whose window does not fit entirely inside `chunk` (too close to
-// either edge) is silently skipped -- there is no cross-chunk stitching
-// here, matching AnalysisFeed's whole "falling behind costs resolution,
-// never correctness" stance. At ~3000 samples/chunk and a ~61-sample
-// window this discards a small fraction of spikes near chunk boundaries,
-// never all of them, and never anything on the detection path (SpikeQueue
-// still gets every spike; only AnalysisFeed's copy is windowed here).
+// WHY THIS TAKES A SAMPLE SPAN AND NOT JUST A CHUNK
+// -------------------------------------------------
+// A detection's sampleIndex refers to a sample EARLIER than the chunk it
+// was reported in. ConvolutionEngine uses the centered-correlation
+// convention and then needs minSeparationSamples of lookahead before a peak
+// can be declared, so a spike surfaces roughly (templateLength-1)/2 +
+// minSeparationSamples samples after the sample it names -- about 60 at
+// L=61, and its 61-sample window starts templateOffset before that again.
+//
+// With 5 ms chunks (150 samples at 30 kHz) that window is essentially NEVER
+// inside the chunk the spike arrived with. Measured on a live run before
+// this was fixed: 49,649 spikes, 0 amplitude records, every one skipped by
+// the relStart < 0 test.
+//
+// So the caller passes a span that covers recent history, not one chunk.
+// AnalysisThread keeps a rolling buffer for exactly this. A spike whose
+// window still falls outside the span is skipped rather than stitched --
+// that is the correct behaviour at a genuine buffer edge, and it now
+// discards a small fraction rather than all of them.
+// `samples` is [nSamples * nChannels], channel-minor per sample, covering
+// absolute indices [firstSampleIndex, firstSampleIndex + nSamples).
+// `spikes` need not lie in that span; those that do not are skipped.
+std::vector<livewire::WireRecord> extractAmplitudeRecords(
+    const float *samples, int nSamples, int nChannels,
+    long long firstSampleIndex,
+    const std::vector<SpikeEvent> &spikes,
+    const MultiFilterBank &filterBank,
+    int templateOffset );
+
+// Convenience overload over one chunk's own samples. Correct only when the
+// spikes' windows lie inside the chunk, which for LIVE detections they do
+// not -- see the note above. Kept for tests and offline callers that place
+// spikes inside the span themselves.
 std::vector<livewire::WireRecord> extractAmplitudeRecords(
     const AnalysisFeed::Chunk &chunk,
     const MultiFilterBank &filterBank,

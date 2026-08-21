@@ -10,6 +10,7 @@
 #include "ThreadSafeQueue.h"
 #include "SpikeQueue.h"
 #include "AnalysisFeed.h"
+#include "DriftSchedule.h"
 #include "Events.h"
 
 class EventPublisher;
@@ -106,7 +107,8 @@ public:
                          SpikeQueue *spikeQueue = 0,
                          EventPublisher *publisher = 0,
                          const SyllableFromSy &syllableFromSy = SyllableFromSy(),
-                         AnalysisFeed *analysisFeed = 0 );
+                         AnalysisFeed *analysisFeed = 0,
+                         DriftSchedule *driftSchedule = 0 );
 
     void start();
     void stop();  // signals the loop to exit; does not join
@@ -129,6 +131,13 @@ private:
     int              fetchChunkMs_;
     std::string      spikeTimesPath_;
     std::string      latencyLogPath_;
+
+    // Optional. Non-null means filter swaps are applied as their
+    // scheduled time arrives; null means the bank never changes, which
+    // is what an undrifted (or calibrate_all_units.py) filter set wants.
+    // Owned by the caller and read only from this thread.
+    DriftSchedule  *driftSchedule_;
+    long long       nSwapsApplied_;
 
     SpikeQueue     *spikeQueue_;
     EventPublisher *publisher_;

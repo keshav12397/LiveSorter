@@ -49,11 +49,13 @@ public:
     long long nSamplesSeen() const { return nSamplesSeen_.load(); }
     long long nSpikesSeen()  const { return nSpikesSeen_.load(); }
     long long nAmpRecords()  const { return nAmpRecords_.load(); }
+    long long nSpikesOutOfSpan() const { return nOutOfSpan_.load(); }
 
     std::string summary() const;
 
 private:
     void runLoop();
+    void appendToHistory( const AnalysisFeed::Chunk &c );
 
     AnalysisFeed &feed_;
     const MultiFilterBank *filterBank_;
@@ -67,6 +69,21 @@ private:
 
     // Reused across chunks so the steady state does not allocate.
     std::vector<livewire::WireRecord> amps_;
+
+    // Rolling sample history. A detection names a sample EARLIER than
+    // the chunk it arrives in (centered correlation + NMS lookahead),
+    // so extracting from the arriving chunk alone finds nothing --
+    // measured live at 49,649 spikes and 0 records before this existed.
+    // Held here rather than in AnalysisFeed because the pool buffer is
+    // released straight back to the fetch thread; this is the analysis
+    // side's own copy of what it still needs.
+    std::vector<float> hist_;
+    long long          histFirstSample_;   // absolute index of hist_[0]
+    int                histSamples_;       // valid samples in hist_
+    int                histCapacity_;      // in samples
+    int                histChannels_;
+
+    std::atomic<long long> nOutOfSpan_;
 
     std::atomic<bool> stopFlag_;
     std::thread        thread_;

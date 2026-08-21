@@ -49,6 +49,7 @@
 #include "SpikeQueue.h"
 #include "AnalysisFeed.h"
 #include "AnalysisThread.h"
+#include "DriftSchedule.h"
 #include "SglxMetaReader.h"
 #include "MultiFilterBank.h"
 #include "ImecFetchThreadCpu.h"
@@ -294,7 +295,25 @@ int main( int argc, char **argv )
         // (mainCalibrateAllUnits.cpp), because the extraction window has to
         // be the window the filters were fit against; a mismatch here would
         // silently shift every centroid rather than fail.
-        AnalysisThread analysisThread( analysisFeed, filterBank, pub,
+        // The analysis thread reads sample data by channel, so it needs a
+        // bank whose channels are CAR-GROUP INDICES, not raw SpikeGLX ids.
+        // ImecFetchThreadCpu translates its OWN copy (it takes the bank by
+        // value); `filterBank` here is still raw. Handing the raw bank over
+        // made every channel fail the extractor's bounds test and produced
+        // zero amplitude records on a live run, silently.
+        MultiFilterBank analysisBank = filterBank;
+        {
+            std::vector<int> carIds = loadChanMapJson( carChannelMapJson );
+            int     badUnit = -1;
+            int32_t badChan = -1;
+            if( !analysisBank.translateChannelsToCarGroup( carIds, &badUnit, &badChan ) ) {
+                throw std::runtime_error(
+                    "unit at index " + std::to_string( badUnit ) + " uses channel " +
+                    std::to_string( badChan ) + ", not part of the CAR channel group" );
+            }
+        }
+
+        AnalysisThread analysisThread( analysisFeed, analysisBank, pub,
                                         cfg.getInt( "templateOffset", 20 ) );
 
         ImecFetchThreadCpu::SyllableFromSy syFromSy;
@@ -316,6 +335,31 @@ int main( int argc, char **argv )
             syFromSy.syllableTimesPath = cfg.getString( "syllableTimesPath", "" );
         }
 
+        // Drift schedule: filter swaps written by
+        // FilterGen/calibrate_drift_aware.py alongside the filter files. An
+        // absent drift_schedule.bin is the normal case (an undrifted filter
+        // set, or one from calibrate_all_units.py) and loads as an empty
+        // schedule, so this is unconditional. Only a present-but-corrupt
+        // file throws.
+        DriftSchedule driftSchedule = DriftSchedule::load( filterDir );
+        if( !driftSchedule.events.empty() ) {
+            if( driftSchedule.templateLength != filterBank.templateLength ||
+                driftSchedule.nChannelsPerUnit != filterBank.nChannelsPerUnit ) {
+                throw std::runtime_error(
+                    "drift_schedule.bin was written for a different filter shape "
+                    "than filterDir's bank (schedule " +
+                    std::to_string( driftSchedule.templateLength ) + "x" +
+                    std::to_string( driftSchedule.nChannelsPerUnit ) + ", bank " +
+                    std::to_string( filterBank.templateLength ) + "x" +
+                    std::to_string( filterBank.nChannelsPerUnit ) +
+                    ") -- they must come from the same calibration run" );
+            }
+            std::cout << "Drift schedule: " << driftSchedule.events.size()
+                       << " scheduled filter swaps, first at t="
+                       << driftSchedule.events.front().t_s << "s, last at t="
+                       << driftSchedule.events.back().t_s << "s\n";
+        }
+
         ImecFetchThreadCpu imecThread(
             hIM, filterBank,
             carChannelMapJson, applyHighpass, highpassCutoffHz,
@@ -323,7 +367,8 @@ int main( int argc, char **argv )
             fetchChunkMs,
             cfg.requireString( "spikeTimesPath" ),
             cfg.getString( "latencyLogPath", "" ),
-            &spikeQueue, pub, syFromSy, &analysisFeed );
+            &spikeQueue, pub, syFromSy, &analysisFeed,
+            driftSchedule.events.empty() ? 0 : &driftSchedule );
 
         NiFetchThread niThread(
             hNI,
