@@ -255,23 +255,27 @@ def main():
     ap.add_argument("--max-units", type=int, default=0)
     ap.add_argument("--workers", type=int, default=0)
     ap.add_argument("--cov-t-max", type=float, default=60.0,
-                     help="Seconds of the train half to scan when building "
-                          "the two SHARED cov_by_lag arrays (shared_all, "
-                          "shared_none). Matches generate_filter.py's own "
-                          "--t-max default for noise-covariance estimation. "
-                          "Necessary for 'shared_none': with no spikes "
-                          "excluded, the whole train half is ONE spike-free "
-                          "segment, and noise_cov_by_lag's cost is "
+                     help="Starting window (seconds of the train half) for "
+                          "the SHARED cov_by_lag arrays (shared_all, "
+                          "shared_none) and for peruser_capped's rescan. "
+                          "Matches generate_filter.py's own --t-max default "
+                          "for noise-covariance estimation. Doubled "
+                          "automatically until shared_all finds enough "
+                          "spike-free gaps (with every cluster's spikes "
+                          "excluded, a short window can have NONE at all --"
+                          "measured on D:/sim_probe_drift, 60s wasn't "
+                          "enough with 160 units excluded, 120s was) -- the "
+                          "window that succeeds is then reused for "
+                          "shared_none and peruser_capped too, so all three "
+                          "capped variants see the same amount of data and "
+                          "only their exclusion set differs. Necessary at "
+                          "all because noise_cov_by_lag's cost is "
                           "O(nlags * n_ch^2 * segment_length) over the FULL "
                           "channel group (not just a handful of selected "
-                          "channels, unlike the per-unit baseline) -- "
-                          "unbounded this is impractical (a 900s window at "
-                          "96 channels does not finish in reasonable time). "
-                          "'shared_all' does not strictly need the cap (its "
-                          "spike-free gaps are already short with many "
-                          "clusters excluded) but is capped identically for "
-                          "an apples-to-apples comparison between the two "
-                          "shared variants.")
+                          "channels, unlike the uncapped per-unit baseline) "
+                          "-- shared_none with nothing excluded makes the "
+                          "whole window ONE segment, and uncapped that did "
+                          "not finish in practical time on a 900s window.")
     ap.add_argument("--scratch-dir")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--seed", type=int, default=0)
@@ -310,19 +314,41 @@ def main():
     data_train = data[:split_t]
     spike_t_train_all = spike_t[spike_t < split_t]
 
-    cov_max_samples = min(data_train.shape[0], int(args.cov_t_max * fs))
-    print(f"Building shared cov_by_lag over the FULL channel group "
-          f"(first {cov_max_samples / fs:.1f}s of train), "
-          f"excluding ALL sorted spikes (variant 'shared_all')...")
-    t0 = time.time()
-    cov_by_lag_all = gf.noise_cov_by_lag(
-        data_train, np.sort(spike_t_train_all), L, off, cov_max_samples)
-    print(f"  done ({time.time() - t0:.1f}s), shape {cov_by_lag_all.shape}, "
-          f"{cov_by_lag_all.nbytes / 1e6:.1f} MB")
+    # ONE window length for shared_all, shared_none AND peruser_capped, or
+    # the "shared exclusion costs X" comparison is confounded by "shared
+    # also saw a different amount of data than peruser_capped" (this is
+    # exactly the confound peruser_capped exists to remove -- see the
+    # VARIANTS comment above). Start at --cov-t-max and grow it: with every
+    # cluster's spikes excluded (shared_all), a short window can have NO
+    # gap >= 2*template_length at all -- measured on this session, a flat
+    # 60s cap raises noise_cov_by_lag's "No sufficiently long spike-free
+    # segments" ValueError, since 160 units' spikes blanket a short window
+    # almost solid. Doubling until shared_all succeeds finds the shortest
+    # window that actually has usable gaps, instead of guessing one.
+    cand_s = args.cov_t_max
+    cov_by_lag_all = None
+    while cov_by_lag_all is None:
+        cand_samples = min(data_train.shape[0], int(cand_s * fs))
+        print(f"Building shared cov_by_lag over the FULL channel group "
+              f"(first {cand_samples / fs:.1f}s of train), "
+              f"excluding ALL sorted spikes (variant 'shared_all')...")
+        t0 = time.time()
+        try:
+            cov_by_lag_all = gf.noise_cov_by_lag(
+                data_train, np.sort(spike_t_train_all), L, off, cand_samples)
+        except ValueError as e:
+            if cand_samples >= data_train.shape[0]:
+                raise
+            print(f"  {e} -- doubling window and retrying")
+            cand_s *= 2
+            continue
+        print(f"  done ({time.time() - t0:.1f}s), shape {cov_by_lag_all.shape}, "
+              f"{cov_by_lag_all.nbytes / 1e6:.1f} MB")
+    cov_max_samples = cand_samples
 
     print(f"Building shared cov_by_lag over the FULL channel group "
-          f"(first {cov_max_samples / fs:.1f}s of train), "
-          f"excluding NOTHING (variant 'shared_none')...")
+          f"(first {cov_max_samples / fs:.1f}s of train, same window as "
+          f"shared_all), excluding NOTHING (variant 'shared_none')...")
     t0 = time.time()
     cov_by_lag_none = gf.noise_cov_by_lag(
         data_train, np.array([], dtype=np.int64), L, off, cov_max_samples)
