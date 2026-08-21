@@ -99,6 +99,7 @@
                 "ClosedLoop/NiFetchThread.cpp",
                 "ClosedLoop/DecisionThread.cpp",
                 "ClosedLoop/AnalysisThread.cpp",
+                "ClosedLoop/AmplitudeExtractor.cpp",
                 "ClosedLoop/EventPublisher.cpp",
                 "SDK/API/SglxCppClient.cpp",
                 "/I",

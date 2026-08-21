@@ -283,7 +283,18 @@ int main( int argc, char **argv )
         int nCarChansForFeed = static_cast<int>( loadChanMapJson( carChannelMapJson ).size() );
         AnalysisFeed analysisFeed( maxChunkSamplesForFeed, nCarChansForFeed,
                                     cfg.getInt( "analysisFeedBuffers", 8 ) );
-        AnalysisThread analysisThread( analysisFeed );
+        // The analysis thread owns amplitude extraction for the viewer's
+        // drift tracker (AnalysisThread.h / AmplitudeExtractor.h). It is
+        // given `pub` rather than `&publisher` so that a disabled or
+        // failed-to-bind viewer degrades it to a counting consumer instead
+        // of publishing into a socket that was never started.
+        //
+        // templateOffset comes from the SAME config key calibration used
+        // (mainCalibrateAllUnits.cpp), because the extraction window has to
+        // be the window the filters were fit against; a mismatch here would
+        // silently shift every centroid rather than fail.
+        AnalysisThread analysisThread( analysisFeed, filterBank, pub,
+                                        cfg.getInt( "templateOffset", 20 ) );
 
         ImecFetchThreadCpu::SyllableFromSy syFromSy;
         if( useImecSy ) {
