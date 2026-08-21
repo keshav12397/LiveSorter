@@ -49,7 +49,6 @@
                 "ClosedLoop/SglxMetaReader.cpp",
                 "ClosedLoop/FilterBank.cpp",
                 "ClosedLoop/ConvolutionEngine.cpp",
-                "ClosedLoop/Calibration.cpp",
                 "ClosedLoop/ImecFetchThread.cpp",
                 "ClosedLoop/NiFetchThread.cpp",
                 "ClosedLoop/DecisionThread.cpp",
@@ -126,49 +125,6 @@
             ]
         },
         {
-            "label": "build calibrate all units",
-            "type": "shell",
-            "command": "cl.exe",
-            "args": [
-                "/EHsc",
-                "/std:c++17",
-                "/O2",
-                "/arch:AVX2",
-                "/Zi",
-                "/Fe:CalibrateAllUnits.exe",
-                "/Fo:build\\",
-                "ClosedLoop/mainCalibrateAllUnits.cpp",
-                "ClosedLoop/Config.cpp",
-                "ClosedLoop/SglxMetaReader.cpp",
-                "ClosedLoop/KilosortReader.cpp",
-                "ClosedLoop/LcmvFit.cpp",
-                "ClosedLoop/NoiseCovariance.cpp",
-                "ClosedLoop/OfflinePreprocessor.cpp",
-                "ClosedLoop/OfflineScorer.cpp",
-                "ClosedLoop/ThresholdSweep.cpp",
-                "ClosedLoop/MultiFilterBank.cpp",
-                "ClosedLoop/MultiConvolutionEngine.cpp",
-                "ClosedLoop/ConvolutionEngine.cpp",
-                "/I",
-                "SDK/API",
-                "/I",
-                "ClosedLoop"
-            ],
-            "options": {
-                "env": {
-                    "PATH": "C:\\Program Files (x86)\\Microsoft Visual Studio\\2017\\Community\\VC\\Tools\\MSVC\\14.16.27023\\bin\\Hostx64\\x64;${env:PATH}",
-                    "LIB": "C:\\Program Files (x86)\\Microsoft Visual Studio\\2017\\Community\\VC\\Tools\\MSVC\\14.16.27023\\ATLMFC\\lib\\x64;C:\\Program Files (x86)\\Microsoft Visual Studio\\2017\\Community\\VC\\Tools\\MSVC\\14.16.27023\\lib\\x64;C:\\Program Files (x86)\\Windows Kits\\10\\lib\\10.0.19041.0\\ucrt\\x64;C:\\Program Files (x86)\\Windows Kits\\10\\lib\\10.0.19041.0\\um\\x64"
-                }
-            },
-            "group": {
-                "kind": "build",
-                "isDefault": false
-            },
-            "problemMatcher": [
-                "$msCompile"
-            ]
-        },
-        {
             "label": "build offline replay",
             "type": "shell",
             "command": "cl.exe",
@@ -224,6 +180,8 @@
                 "Viewer/main.cpp",
                 "Viewer/SessionModel.cpp",
                 "Viewer/LiveWireClient.cpp",
+                "Viewer/DriftPool.cpp",
+                "Viewer/DriftTracker.cpp",
                 "third_party/imgui/imgui.cpp",
                 "third_party/imgui/imgui_draw.cpp",
                 "third_party/imgui/imgui_tables.cpp",

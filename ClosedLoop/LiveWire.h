@@ -9,7 +9,7 @@
 // Both ends include THIS header. That is the whole point of the file: a
 // viewer that re-derives the layout from a written spec is a second
 // implementation of the same thing, and this repo has twice paid for one of
-// those (Calibration.cpp's fit/sweep port, and the two validation scripts'
+// those (a C++ fit/sweep port, since removed, and the two validation scripts'
 // duplicated `% wrap_samples` alignment -- see live_tracking_bug_report.md).
 // If a field changes here, both sides change together or neither compiles.
 //

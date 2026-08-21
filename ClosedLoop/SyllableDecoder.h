@@ -15,7 +15,7 @@
 // exactly one implementation and the production NI path cannot drift away
 // from the path used to test it. (README.md and this repo's history are
 // emphatic about the cost of a second implementation of shared logic --
-// Calibration.cpp's fit/sweep port and the two validation scripts'
+// a C++ fit/sweep port, since removed, and the two validation scripts'
 // duplicated alignment both cost long debugging sessions.)
 //
 // Callers differ only in where the digital word comes from and what its

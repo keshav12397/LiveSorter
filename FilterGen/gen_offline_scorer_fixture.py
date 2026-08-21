@@ -14,7 +14,7 @@ ImecFetchThreadGPU::fetchLoop() does), and the expected peak list.
 
 Isolates OfflineScorer.cpp (streaming raw .bin -> Preprocessor ->
 GpuConvolutionEngine with an all -infinity threshold) from the fit step
-(already validated separately: LcmvFit, NoiseCovariance) -- this fixture
+(validated separately in FilterGen's own tests) -- this fixture
 supplies an already-fit real filter directly.
 """
 import argparse

@@ -41,13 +41,6 @@ pythonExe=C:/Users/you/anaconda3/python.exe
 # calibrate_drift_aware.py (which also writes drift_schedule.bin).
 skipCalibration=false
 
-# python (default) = FilterGen/calibrate_all_units.py, the reference
-# implementation. cpp = CalibrateAllUnits.exe, no Python needed on the rig.
-#
-# They do NOT produce the same bank -- measured, channel selection agreed on
-# only 1 of 4 units. cpp is also no faster and no lighter (see README).
-# Switching this is a recalibration, not a no-op.
-calibrationBackend=python
 
 # 0 = every qualifying unit. Lower it for a quick smoke test.
 calibrationMaxUnits=0

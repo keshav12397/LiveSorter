@@ -27,13 +27,10 @@ skipCalibration=false
 # fits the LCMV filter + sweeps the threshold in the one Python
 # implementation this whole project's channel-selection/filter/threshold
 # math actually lives in, then (re)writes channels_<id>.bin/filter_<id>.bin/
-# threshold_<id>.bin for FilterBank to load. "cpp" uses Calibration.cpp's
-# from-scratch C++ port instead (kept as a fallback -- see README).
-calibrationBackend=python
 trainingBinPath=D:/test_newsorter/rawData/Lav69_d1.0_g0_tcat.imec0.ap.bin
 trainingKsDir=D:/test_newsorter/ks_out
 
-# --- calibrationBackend=python settings ----------------------------------
+# --- Calibration settings ------------------------------------------------
 # Use the FULL path to the interpreter that has numpy/scipy installed (e.g.
 # a conda env's python.exe) -- ClosedLoop.exe won't inherit your shell's
 # conda activation, so a bare "python" may silently resolve to the wrong
@@ -61,12 +58,6 @@ calibrationRidge=1e-3
 calibrationMaxSpikes=2000
 calibrationSeed=0
 
-# --- calibrationBackend=cpp settings (ignored for the python backend) ----
-calibrationLogPath=D:/test_newsorter/filters_out/calibration_log_74.csv
-# "best_f1" or "best_recall_under_fp_rate"
-calibrationCriterion=best_f1
-# only used if calibrationCriterion=best_recall_under_fp_rate
-maxFalsePositiveRateHz=1.0
 
 # --- Fetch cadence --------------------------------------------------------
 fetchChunkMs=5
@@ -109,8 +100,7 @@ decisionLogPath=D:/test_newsorter/decisions.log
 #     calibrationNThresholds, calibrationMinSpikes, calibrationMaxUnits,
 #     calibrationWorkers, calibrationSeed, templateOffset.
 #     calibrationScript defaults to FilterGen/calibrate_all_units.py here,
-#     not calibrate_for_closedloop.py. There is no calibrationBackend=cpp
-#     equivalent: CalibrateAllUnits.exe is a separate binary.
+#     not calibrate_for_closedloop.py.
 #   Fetch:    sglxHost, sglxPort, filterDir, templateLength,
 #             filterNChannels, carChannelMapJson, applyHighpass,
 #             highpassCutoffHz, imecSyncBit, fetchChunkMs, spikeTimesPath,

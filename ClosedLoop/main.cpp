@@ -21,7 +21,6 @@
 #include "Config.h"
 #include "RunProcess.h"
 #include "FilterBank.h"
-#include "Calibration.h"
 #include "ThreadSafeQueue.h"
 #include "SpikeQueue.h"
 #include "Events.h"
@@ -101,9 +100,8 @@ std::string resolveRelativeToExe( const std::string &path )
 // filter on a training split, sweeps the detection threshold against the
 // held-out remainder's Kilosort ground truth, and writes
 // channels_<id>.bin/filter_<id>.bin/threshold_<id>.bin -- see README's
-// "Calibration via Python" section for why this replaced a from-scratch C++
-// port of the same fit+sweep math (Calibration.cpp remains as an opt-in
-// fallback via calibrationBackend=cpp). Throws std::runtime_error if the
+// "Calibration" section for why this replaced a from-scratch C++ port of
+// the same fit+sweep math. Throws std::runtime_error if the
 // script exits nonzero, so main()'s catch block aborts startup cleanly.
 void runPythonCalibration( const Config &cfg, int targetId, const std::string &filterDir )
 {
@@ -118,7 +116,7 @@ void runPythonCalibration( const Config &cfg, int targetId, const std::string &f
             "runPythonCalibration: config needs either 'interferers' "
             "(comma-separated Kilosort cluster ids of nearby units to null "
             "out) or 'autoInterferers' (a count to auto-pick by activity) "
-            "when skipCalibration=false and calibrationBackend=python" );
+            "when skipCalibration=false" );
 
     std::ostringstream cmd;
     cmd << "\"" << pythonExe << "\""
@@ -201,26 +199,22 @@ int main( int argc, char **argv )
         double      highpassCutoffHz  = cfg.getDouble( "highpassCutoffHz", 300.0 );
 
         // ---- Phase A: calibration -----------------------------------------
-        // Default backend shells out to Python (see runPythonCalibration()
-        // above / README's "Calibration via Python" section); set
-        // calibrationBackend=cpp to use Calibration.cpp's from-scratch C++
-        // port instead (kept as a fallback, not the default -- it's a
-        // second implementation of the same fit+sweep math that can drift
-        // out of sync with Python, which is exactly what caused this
-        // session's earlier ~50%-recall-cap bug hunt).
-        std::string calibrationBackend = cfg.getString( "calibrationBackend", "python" );
-        bool        skipCalibration    = cfg.getBool( "skipCalibration", false );
+        // FilterGen/calibrate_for_closedloop.py is the ONLY implementation of
+        // the fit+sweep math. A from-scratch C++ port of it used to live in
+        // Calibration.cpp as an opt-in backend; it was removed because a
+        // second implementation of shared math drifts, and this one did --
+        // its peer-selection bug capped recall near 50% and cost a long
+        // debugging session before the cause was found in the port rather
+        // than the algorithm.
+        bool skipCalibration = cfg.getBool( "skipCalibration", false );
 
-        // The python backend regenerates channels_/filter_/threshold_<id>.bin
-        // from scratch and doesn't read the existing ones -- so filterDir
-        // doesn't need to already contain a filter for this targetId in that
-        // case. Only skipCalibration (uses the files as-is) and the cpp
-        // backend (only sweeps threshold; needs the existing channels/taps
-        // as its starting point) require the pre-run load below.
+        // Calibration regenerates channels_/filter_/threshold_<id>.bin from
+        // scratch and does not read the existing ones, so filterDir need not
+        // already hold a filter for this targetId. Only skipCalibration
+        // (which uses the files as-is) requires the pre-run load below.
         FilterBank filterBank;
-        bool       needInitialLoad = skipCalibration || calibrationBackend != "python";
 
-        if( needInitialLoad ) {
+        if( skipCalibration ) {
             filterBank = FilterBank::load( filterDir, targetId, templateLength );
             std::cout << "Loaded filter for target " << targetId << ": "
                       << filterBank.nChannels() << " channels, "
@@ -228,50 +222,20 @@ int main( int argc, char **argv )
         }
 
         if( !skipCalibration ) {
+            std::cout << "Running calibration (FilterGen/calibrate_for_closedloop.py)...\n";
+            runPythonCalibration( cfg, targetId, filterDir );
 
-            if( calibrationBackend == "python" ) {
+            // The script just wrote channels_<id>.bin/filter_<id>.bin/
+            // threshold_<id>.bin (from scratch, if this is the first run) --
+            // load so the in-memory FilterBank reflects the fresh fit.
+            filterBank = FilterBank::load( filterDir, targetId, templateLength );
 
-                std::cout << "Running Python calibration (FilterGen/calibrate_for_closedloop.py)...\n";
-                runPythonCalibration( cfg, targetId, filterDir );
-
-                // Python just wrote channels_<id>.bin/filter_<id>.bin/
-                // threshold_<id>.bin on disk (from scratch, if this is the
-                // first run) -- load so the in-memory FilterBank reflects
-                // the freshly fitted filter.
-                filterBank = FilterBank::load( filterDir, targetId, templateLength );
-
-                std::cout << "Calibration done: threshold=" << filterBank.threshold
-                          << " (" << filterBank.nChannels() << " channels)\n";
-            }
-            else {
-
-                std::cout << "Running C++ calibration against training data...\n";
-
-                Calibration::Result calib = Calibration::run(
-                    cfg.requireString( "trainingBinPath" ),
-                    cfg.requireString( "trainingKsDir" ),
-                    targetId,
-                    filterBank,
-                    carChannelMapJson,
-                    applyHighpass,
-                    highpassCutoffHz,
-                    cfg.getInt( "fetchChunkMs", 5 ),
-                    cfg.getString( "calibrationCriterion", "best_f1" ),
-                    cfg.getDouble( "maxFalsePositiveRateHz", 1.0 ),
-                    cfg.getString( "calibrationLogPath", "" ) );
-
-                filterBank.threshold = calib.bestThreshold;
-
-                std::cout << "Calibration done: threshold=" << calib.bestThreshold
-                          << "  recall="    << calib.bestPoint.recall
-                          << "  precision=" << calib.bestPoint.precision
-                          << "  f1="        << calib.bestPoint.f1
-                          << "  fpRateHz="  << calib.bestPoint.fpRateHz << "\n";
-            }
+            std::cout << "Calibration done: threshold=" << filterBank.threshold
+                       << " (" << filterBank.nChannels() << " channels)\n";
         }
         else {
             std::cout << "skipCalibration=true -- using threshold from threshold_"
-                      << targetId << ".bin as-is: " << filterBank.threshold << "\n";
+                       << targetId << ".bin as-is: " << filterBank.threshold << "\n";
         }
 
         // ---- Connect to live SpikeGLX -----------------------------------------

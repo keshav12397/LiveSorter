@@ -26,7 +26,7 @@ trivial cost next to that.
 This reuses generate_filter.py's building blocks and threshold_sweep_real.py's
 fit_lcmv/sweep_thresholds so there is exactly one implementation of "how the
 filter is fit" and "how a threshold is scored" -- this script just sequences
-them and writes the final artifact, instead of ClosedLoop/Calibration.cpp
+them and writes the final artifact, instead of a C++ port
 maintaining an independent (and, this session found out the hard way,
 drift-prone) C++ port of the same math.
 

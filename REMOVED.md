@@ -210,7 +210,79 @@ the drift or amplitude work touched it.
 
 ---
 
-## 6. README narrative moved here
+## 6. The C++ calibration path
+
+Removed entirely. It survives on `all_units_cpu` if it is ever needed.
+
+    CalibrateAllUnits.exe        mainCalibrateAllUnits.cpp
+    its exclusive dependencies   KilosortReader, LcmvFit, NoiseCovariance,
+                                 OfflinePreprocessor, ThresholdSweep,
+                                 ScratchMemmap.h, DenseLinAlg.h
+    single-target C++ backend    Calibration.cpp/.h, and main.cpp's
+                                 calibrationBackend=cpp branch
+    all-units C++ backend        mainAllUnits.cpp's calibrationBackend=cpp
+    its equivalence tests        test_lcmv_equivalence,
+                                 test_noise_covariance_equivalence,
+                                 test_dense_linalg_equivalence
+    their fixture generators     gen_lcmv_fixture.py,
+                                 gen_noise_covariance_fixture.py,
+                                 gen_dense_linalg_fixture.py
+    the backend comparison       compare_calibration_backends.py
+    the build task               "build calibrate all units"
+
+**`OfflineScorer` and `NpyReader` were NOT removed** — they look like part of
+this cluster but `OfflineReplay.exe` links them, so
+`test_offline_scorer_equivalence.cpp` and `gen_offline_scorer_fixture.py`
+stay too. The deletion set was derived by walking the include graph from
+every surviving entry point rather than by eye, precisely because that
+distinction is not obvious from the filenames.
+
+`FilterGen/test_noise_covariance_equivalence.py` also stays. Despite the
+name it compares Python against Python (`noise_covariance_vectorized` vs the
+original `noise_covariance`) and has nothing to do with the C++ port.
+
+### Why, given it was a working, tested binary
+
+It was measured against the Python on 4 units of the simulated session,
+immediately after being wired in as `calibrationBackend=cpp`:
+
+    channel selection identical on   1 of 4 units
+    unit 51 (channels DID match)     tap corr 0.758, rel error 0.66
+    f1                               mean -0.013, max |delta| 0.026
+
+    backend   runtime    peak private   peak working set
+    python     394.4 s       3.82 GB          61.03 GB
+    cpp        387.1 s       3.99 GB           9.56 GB
+
+The two backends select the same units and then diverge: different channels
+on three of four, and on the one unit whose channel sets agree the taps
+correlate at 0.758 — a different filter, not float noise.
+
+All six equivalence tests passed throughout. They pin the LCMV solve, the
+noise covariance and the scorer; the divergence lives in what they do not
+cover — candidate selection, interferer picking, RNG draws. **Component
+equivalence is not pipeline equivalence**, and that gap is the entire
+lesson here.
+
+And it bought nothing to offset that: runtime within noise, private memory
+near-identical, both dominated by the same ~20.7 GB preprocessing pass. (The
+working-set gap is *not* a saving — it is shared pages of the memory-mapped
+scratch file. Reading a working set as memory used produced a wrong
+conclusion earlier in this project.)
+
+So the C++ path was a second implementation of shared math that measurably
+disagreed with the reference, cost the same to run, and had to be kept in
+sync forever. `Calibration.cpp` had already done exactly this once before:
+its peer-selection bug capped recall near 50% and cost a long debugging
+session that ended in the port, not the algorithm.
+
+The one thing lost is the ability to calibrate on a machine with no
+Python/numpy/scipy. Nothing in this project needs that today, and
+`all_units_cpu` still has it.
+
+---
+
+## 7. README narrative moved here
 
 The previous README was 852 lines, of which roughly half was investigation
 history: sections titled "Why the earlier measurement said the opposite",

@@ -15,11 +15,11 @@ struct UnitPeaks {
 // Streams [testStartSample, testStartSample + testNumSamples) of the raw
 // SpikeGLX .bin file through Preprocessor + MultiConvolutionEngine (both
 // reused completely unmodified from the live detection pipeline -- see the
-// mainCalibrateAllUnits.cpp), using a MultiFilterBank built with an all
+// FilterGen), using a MultiFilterBank built with an all
 // -infinity threshold array (MultiFilterBank::fromHostArrays) so every
 // windowed-NMS-accepted peak gets reported instead of only above-threshold
 // detections -- this is what makes a held-out threshold SWEEP possible
-// afterward (ThresholdSweep.h), without a second NMS kernel to validate
+// afterward by the caller, without a second NMS kernel to validate
 // separately.
 //
 // unitChannelsInCarGroup: [nUnits * N], already translated to indices

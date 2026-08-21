@@ -33,8 +33,7 @@
 //
 //   [spikeSample - templateOffset, spikeSample - templateOffset + templateLength)
 //
-// the same window convention LcmvFit.h's meanWaveform() and
-// generate_filter.py's mean_waveform() use. This is PEAK amplitude of one
+// the same window convention generate_filter.py's mean_waveform() uses. This is PEAK amplitude of one
 // spike's own waveform, not peak-to-peak of a many-spike mean -- a single
 // spike doesn't have the second one to reference. drift_estimate.py's
 // _position_from_waveform works from a mean waveform's ptp because it

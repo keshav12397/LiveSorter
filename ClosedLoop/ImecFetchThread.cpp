@@ -102,7 +102,7 @@ void ImecFetchThread::fetchLoop()
 
     const long long chunkSamples = static_cast<long long>( fetchChunkMs_ / 1000.0 * sampleRate + 0.5 );
 
-    // minSeparationSamples: templateLength/2, same convention Calibration.cpp's
+    // minSeparationSamples: templateLength/2, same convention every
     // own held-out threshold sweep already uses to pick this filter's
     // threshold in the first place. Passed explicitly for legibility, not to
     // fix anything: ConvolutionEngine's constructor already maps a

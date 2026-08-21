@@ -161,7 +161,7 @@ void ImecFetchThreadCpu::fetchLoop()
 
     Preprocessor preprocessor( nCarChans, highpassCutoffHz_, sampleRate, applyHighpass_, applyCar );
     // minSeparationSamples: templateLength/2, same convention every other
-    // caller uses (Calibration.cpp's single-target path, OfflineScorer.cpp's
+    // caller uses (OfflineScorer.cpp's
     // batch calibration scoring, every NMS equivalence test). Passed
     // explicitly for legibility, not to fix anything: ConvolutionEngine's
     // constructor already maps a non-positive value to templateLength/2, so
